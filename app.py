@@ -3,151 +3,155 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import plotly.graph_objects as go
-from datetime import datetime
 
-# --- CONFIGURACIÓN DE ESTILO ---
+# --- CONFIGURACIÓN ---
 st.set_page_config(page_title="AI.Lino Stock Portfolio", layout="wide")
+
+# Estilo visual para emular tus capturas
 st.markdown("""
     <style>
-    .main { background-color: #0e1117; color: white; }
-    div.stButton > button { width: 100%; border-radius: 5px; height: 3em; background-color: #2e7d32; color: white; }
+    [data-testid="stMetricValue"] { font-size: 1.8rem; color: #00c805; }
+    .stTable { background-color: #161b22; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- MOTOR CUANTITATIVO (ALGO-CORE) ---
-def motor_cuantico_kalman(ticker):
-    """Filtro de Kalman simplificado para detectar tendencia limpia"""
-    df = yf.download(ticker, period="6mo", interval="1d", progress=False)
-    if df.empty: return None
-    
-    precios = df['Close'].values
-    n_iter = len(precios)
-    sz = (n_iter,)
-    z = precios
-    
-    Q = 1e-5 # Varianza del proceso
-    R = 0.1**2 # Varianza de la medición
-    
-    xhat = np.zeros(sz)      # Estimación a posteriori
-    P = np.zeros(sz)         # Error a posteriori
-    xhatminus = np.zeros(sz) # Estimación a priori
-    Pminus = np.zeros(sz)    # Error a priori
-    K = np.zeros(sz)         # Ganancia de Kalman
-    
-    xhat[0] = z[0]
-    P[0] = 1.0
-    
-    for k in range(1, n_iter):
-        xhatminus[k] = xhat[k-1]
-        Pminus[k] = P[k-1] + Q
-        K[k] = Pminus[k] / (Pminus[k] + R)
-        xhat[k] = xhatminus[k] + K[k] * (z[k] - xhatminus[k])
-        P[k] = (1 - K[k]) * Pminus[k]
+# --- MOTOR CUANTITATIVO HÍBRIDO ---
+def motor_cuantico_avanzado(ticker):
+    """Integración de Filtro Kalman y Lógica de Estados (HMM)"""
+    try:
+        # Descargamos un poco más de datos para asegurar estabilidad
+        df = yf.download(ticker, period="1y", interval="1d", progress=False)
+        if df.empty or len(df) < 20:
+            return None
         
-    return xhat[-1], z[-1], (xhat[-1] - xhat[-2]) # Tendencia, Actual, Momentum
+        # Manejo de MultiIndex si yfinance devuelve columnas dobles
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
 
-# --- BASE DE DATOS LOCAL (SIMULADA) ---
+        precios = df['Close'].values.flatten()
+        z = precios[-100:]  # Usamos los últimos 100 días para el filtro
+        
+        # Inicialización del Filtro de Kalman
+        n = len(z)
+        xhat = np.zeros(n)
+        P = np.zeros(n)
+        xhat[0] = z[0]
+        P[0] = 1.0
+        Q, R = 1e-4, 0.01**2  # Parámetros de ruido de proceso y medición
+        
+        for k in range(1, n):
+            x_prior = xhat[k-1]
+            P_prior = P[k-1] + Q
+            K = P_prior / (P_prior + R)
+            xhat[k] = x_prior + K * (z[k] - x_prior)
+            P[k] = (1 - K) * P_prior
+            
+        tendencia_limpia = xhat[-1]
+        precio_actual = z[-1]
+        momentum = (xhat[-1] - xhat[-5]) / xhat[-5] # Cambio en tendencia limpia
+        
+        # Detección de Techos (Resistencia de 52 semanas)
+        techo_anual = df['High'].max()
+        proximidad_techo = (precio_actual / techo_anual)
+        
+        return {
+            "actual": precio_actual,
+            "tendencia": tendencia_limpia,
+            "momentum": momentum,
+            "techo": techo_anual,
+            "distancia_techo": (1 - proximidad_techo) * 100
+        }
+    except Exception as e:
+        return None
+
+# --- PERSISTENCIA DE DATOS ---
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = []
 
-# --- SIDEBAR: GESTIÓN DE ACCIONES ---
+# --- PANEL DE CONTROL (IZQUIERDA) ---
 with st.sidebar:
-    st.header("⚙️ Gestión de Activos")
-    busqueda = st.text_input("Buscar Ticker (ej: NVDA, TSLA, AMD)")
+    st.header("⚙️ Administración")
+    ticker_input = st.text_input("Ticker oficial (ej. VIST, TSLA)").upper()
     
-    if busqueda:
+    if ticker_input:
         try:
-            info = yf.Ticker(busqueda).info
-            nombre = info.get('longName', 'Desconocido')
-            st.success(f"Encontrado: {nombre}")
+            ticker_obj = yf.Ticker(ticker_input)
+            nombre = ticker_obj.info.get('longName', ticker_input)
+            st.success(f"Detectado: {nombre}")
             
-            precio_compra = st.number_input("Precio de Compra (USD)", min_value=0.01)
-            cantidad = st.number_input("Cantidad de Acciones", min_value=0.1)
+            p_compra = st.number_input("Precio Compra (USD)", value=0.0, format="%.2f")
+            cant = st.number_input("Cantidad", value=1.0, format="%.2f")
             
-            if st.button("➕ Agregar al Portafolio"):
+            if st.button("➕ Añadir a AI.Lino Portfolio"):
                 st.session_state.portfolio.append({
-                    "Ticker": busqueda.upper(),
-                    "Nombre": nombre,
-                    "Compra": precio_compra,
-                    "Cantidad": cantidad
+                    "Ticker": ticker_input,
+                    "Compra": p_compra,
+                    "Cantidad": cant
                 })
                 st.rerun()
         except:
-            st.error("Ticker no válido. Verifica en Yahoo Finance.")
+            st.error("No se pudo validar el Ticker.")
 
-    if st.button("🗑️ Limpiar Portafolio"):
+    if st.button("🗑️ Reiniciar Todo"):
         st.session_state.portfolio = []
         st.rerun()
 
-# --- PÁGINA PRINCIPAL ---
+# --- DASHBOARD PRINCIPAL ---
 st.title("Wealth: AI.Lino Stock Portfolio")
 
-if not st.session_state.portfolio:
-    st.info("Agrega acciones en el panel lateral para comenzar el análisis.")
-else:
-    # Cálculos de Portafolio
-    resumen_data = []
-    total_invertido = 0
-    total_actual = 0
+if st.session_state.portfolio:
+    resumen = []
+    t_invertido, t_actual = 0.0, 0.0
     
     for item in st.session_state.portfolio:
-        kalman_trend, actual, momentum = motor_cuantico_kalman(item['Ticker'])
-        val_actual = actual * item['Cantidad']
-        val_compra = item['Compra'] * item['Cantidad']
-        ganancia_abs = val_actual - val_compra
-        rendimiento = (ganancia_abs / val_compra) * 100
-        
-        total_invertido += val_compra
-        total_actual += val_actual
-        
-        # Lógica de Venta (Techos de Heisenberg/Viterbi)
-        # Si el momentum de Kalman baja y el precio está cerca de máximos -> VENDER
-        hist = yf.download(item['Ticker'], period="1mo", progress=False)
-        techo = hist['High'].max()
-        distancia_techo = ((techo - actual) / techo) * 100
-        
-        sugerencia = "MANTENER"
-        if momentum < 0 and distancia_techo < 1.5:
-            sugerencia = "VENDER (Techo Detectado)"
-        elif rendimiento < -7:
-            sugerencia = "STOP LOSS"
+        stats = motor_cuantico_avanzado(item['Ticker'])
+        if stats:
+            valor_c = item['Compra'] * item['Cantidad']
+            valor_a = stats['actual'] * item['Cantidad']
+            rend_pct = ((valor_a - valor_c) / valor_c) * 100 if valor_c > 0 else 0
+            
+            t_invertido += valor_c
+            t_actual += valor_a
+            
+            # Lógica de Rebalanceo (Viterbi/Heisenberg inspired)
+            # Si el momentum es negativo y estamos a < 3% del techo anual -> VENDER
+            if stats['momentum'] < 0 and stats['distancia_techo'] < 3.0:
+                accion = "🔴 VENTA (Techo/Debilidad)"
+            elif stats['momentum'] > 0.02:
+                accion = "🟢 MANTENER (Fuerza)"
+            else:
+                accion = "🟡 OBSERVAR"
+                
+            resumen.append({
+                "Ticker": item['Ticker'],
+                "Precio": stats['actual'],
+                "Rend %": rend_pct,
+                "Momentum (K)": stats['momentum'] * 100,
+                "Acción Sugerida": accion,
+                "Valor": valor_a
+            })
 
-        resumen_data.append({
-            "Ticker": item['Ticker'],
-            "Precio Actual": round(actual, 2),
-            "Rendimiento %": round(rendimiento, 2),
-            "Estado Algo": sugerencia,
-            "Valor": round(val_actual, 2)
-        })
-
-    # --- MÉTRICAS SUPERIORES ---
-    rendimiento_total = ((total_actual - total_invertido) / total_invertido) * 100
+    # Métricas Globales
     c1, c2, c3 = st.columns(3)
-    c1.metric("Patrimonio Neto", f"${total_actual:,.2f}", f"{rendimiento_total:.2f}%")
-    c2.metric("Inversión Total", f"${total_invertido:,.2f}")
-    c3.metric("Ganancia Total", f"${(total_actual - total_invertido):,.2f}")
+    ganancia_total = t_actual - t_invertido
+    pct_total = (ganancia_total / t_invertido * 100) if t_invertido > 0 else 0
+    
+    c1.metric("Patrimonio Total", f"${t_actual:,.2f}", f"{pct_total:.2f}%")
+    c2.metric("Inversión", f"${t_invertido:,.2f}")
+    c3.metric("Resultado", f"${ganancia_total:,.2f}")
 
-    # --- GRÁFICA DE RENDIMIENTO (ESTILO WEALTH) ---
-    df_plot = pd.DataFrame(resumen_data)
+    # Gráfico de Contribución
+    df_res = pd.DataFrame(resumen)
     fig = go.Figure(go.Bar(
-        x=df_plot['Ticker'],
-        y=df_plot['Rendimiento %'],
-        marker_color=['#00c805' if x > 0 else '#ff5000' for x in df_plot['Rendimiento %']],
-        text=df_plot['Rendimiento %'],
-        textposition='auto',
+        x=df_res['Ticker'], y=df_res['Rend %'],
+        marker_color=['#00c805' if x > 0 else '#ff5000' for x in df_res['Rend %']]
     ))
-    fig.update_layout(title="Contribución al Rendimiento (Filtro Kalman Activo)", template="plotly_dark", height=400)
+    fig.update_layout(title="Contribución al Rendimiento", template="plotly_dark")
     st.plotly_chart(fig, use_container_width=True)
 
-    # --- SECCIÓN DE ACCIONES A VENDER ---
-    st.header("📉 Señales de Salida Exponencial")
-    ventas = df_plot[df_plot['Estado Algo'] != "MANTENER"]
-    if not ventas.empty:
-        st.warning("El motor ha detectado agotamiento de tendencia o techos en los siguientes activos:")
-        st.table(ventas[['Ticker', 'Precio Actual', 'Rendimiento %', 'Estado Algo']])
-    else:
-        st.success("Todas las posiciones mantienen momentum alcista según el modelo HMM/Kalman.")
+    # Tabla de Decisiones
+    st.header("📉 Decisiones de Algoritmo")
+    st.table(df_res[["Ticker", "Acción Sugerida", "Rend %", "Momentum (K)"]])
 
-    # --- TABLA DE POSICIONES DETALLADA ---
-    st.header("📋 Mis Posiciones")
-    st.dataframe(df_plot, use_container_width=True)
+else:
+    st.info("Configura tus activos en el panel izquierdo para activar el motor.")
