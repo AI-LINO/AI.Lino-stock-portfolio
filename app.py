@@ -47,13 +47,22 @@ col1, col2 = st.columns([2, 1])
 
 with col1:
     st.write("### Comparativa de Activos")
+    
+    # Creamos la lista de colores de forma segura
+    colores = ['#00c805' if val > 0 else '#ff5000' for val in df_portfolio['Rendimiento %']]
+    
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=df_portfolio['Ticker'],
         y=df_portfolio['Rendimiento %'],
-        marker_color=['#00c805' if x > 0 else '#ff5000' for x in df_portfolio['Rendimiento %']]
+        marker_color=colores  # Usamos la lista ya procesada
     ))
-    fig.update_layout(template="plotly_dark", title="Rendimiento Semanal")
+    
+    fig.update_layout(
+        template="plotly_dark", 
+        title="Rendimiento Semanal (%)",
+        yaxis_title="Variación Porcentual"
+    )
     st.plotly_chart(fig, use_container_width=True)
 
 with col2:
