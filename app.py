@@ -25,265 +25,123 @@ if "portfolio" not in st.session_state:
     st.session_state.portfolio = cargar_datos()
 if "vista" not in st.session_state:
     st.session_state.vista = "dashboard"
+if "sidebar_open" not in st.session_state:
+    st.session_state.sidebar_open = True
 
 # ─────────────────────────────────────────
 #  CONFIG & CSS
 # ─────────────────────────────────────────
 st.set_page_config(page_title="AI.lino PRO", layout="wide", page_icon="📈")
-st.markdown("""
+
+# ── CSS dinámico según estado del sidebar ──
+sidebar_css = """
+    [data-testid="stSidebar"]{
+        min-width:300px!important;max-width:300px!important;
+        display:block!important;
+    }
+    [data-testid="stSidebarCollapsedControl"]{ display:none!important; }
+    button[kind="header"]{ display:none!important; }
+""" if st.session_state.sidebar_open else """
+    [data-testid="stSidebar"]{
+        min-width:0!important;max-width:0!important;
+        width:0!important;overflow:hidden!important;
+        display:none!important;
+    }
+    [data-testid="stSidebarCollapsedControl"]{ display:none!important; }
+    button[kind="header"]{ display:none!important; }
+"""
+
+st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@300;400;500&display=swap');
 
-html,body,[data-testid="stAppViewContainer"]{
-    background:#080810!important;color:#e8e8f0!important;font-family:'Syne',sans-serif!important}
+html,body,[data-testid="stAppViewContainer"]{{
+    background:#080810!important;color:#e8e8f0!important;font-family:'Syne',sans-serif!important}}
 
-[data-testid="stSidebar"]{
-    background:#0c0c18!important;
-    border-right:1px solid #1c1c30!important;
-    min-width:300px!important;max-width:300px!important;
-}
+{sidebar_css}
 
-/* Ocultar el botón nativo de streamlit — usaremos el nuestro */
-[data-testid="stSidebarCollapsedControl"]{ display:none!important; }
-button[kind="header"]{ display:none!important; }
+[data-testid="stSidebar"]{{background:#0c0c18!important;border-right:1px solid #1c1c30!important;}}
 
-/* Botón flotante personalizado — siempre visible */
-#ailino-toggle {
-    position: fixed;
-    top: 50%;
-    left: 0;
-    transform: translateY(-50%);
-    z-index: 99999;
-    background: linear-gradient(160deg, #00ff9d, #00cc7a);
-    border: none;
-    border-radius: 0 14px 14px 0;
-    padding: 18px 10px;
-    cursor: pointer;
-    box-shadow: 4px 0 24px #00ff9d55;
-    transition: all 0.25s ease;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 6px;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 9px;
-    font-weight: 700;
-    color: #080810;
-    letter-spacing: 1px;
-    text-transform: uppercase;
-    line-height: 1;
-}
-#ailino-toggle:hover {
-    padding: 18px 14px;
-    box-shadow: 6px 0 36px #00ff9daa;
-    background: linear-gradient(160deg, #00ffb3, #00ff9d);
-}
-#ailino-toggle .arrow { font-size: 16px; line-height: 1; }
+#MainMenu,footer,header{{ visibility:hidden }}
+[data-testid="stToolbar"]{{ display:none }}
+.block-container{{ padding:0 1.5rem 2rem 1.5rem!important; max-width:100%!important }}
 
-#MainMenu,footer,header{ visibility:hidden }
-[data-testid="stToolbar"]{ display:none }
-.block-container{ padding:0 2rem 2rem 2rem!important; max-width:100%!important }
-
-input[type="text"],input[type="number"],.stTextInput input,.stNumberInput input{
+input[type="text"],input[type="number"],.stTextInput input,.stNumberInput input{{
     background:#10101e!important;border:1px solid #2a2a44!important;
     border-radius:8px!important;color:#e8e8f0!important;
-    font-family:'JetBrains Mono',monospace!important;font-size:13px!important}
-[data-testid="stSelectbox"]>div>div{
+    font-family:'JetBrains Mono',monospace!important;font-size:13px!important}}
+[data-testid="stSelectbox"]>div>div{{
     background:#10101e!important;border:1px solid #2a2a44!important;
-    border-radius:8px!important;color:#e8e8f0!important}
+    border-radius:8px!important;color:#e8e8f0!important}}
 
-.stButton>button{
+.stButton>button{{
     background:linear-gradient(135deg,#00ff9d18,#00ff9d33)!important;
     border:1px solid #00ff9d55!important;border-radius:8px!important;
     color:#00ff9d!important;font-family:'Syne',sans-serif!important;
-    font-weight:700!important;font-size:13px!important}
-.stButton>button:hover{
+    font-weight:700!important;font-size:13px!important}}
+.stButton>button:hover{{
     background:linear-gradient(135deg,#00ff9d33,#00ff9d55)!important;
-    box-shadow:0 0 16px #00ff9d33!important}
-.stButton>button[kind="secondary"]{
-    background:transparent!important;border:1px solid #2a2a44!important;color:#666688!important}
+    box-shadow:0 0 16px #00ff9d33!important}}
+.stButton>button[kind="secondary"]{{
+    background:transparent!important;border:1px solid #2a2a44!important;color:#666688!important}}
 
-[data-testid="metric-container"]{
+[data-testid="metric-container"]{{
     background:#0e0e1e!important;border:1px solid #1c1c30!important;
-    border-radius:12px!important;padding:16px!important}
-[data-testid="stMetricValue"]{font-family:'JetBrains Mono',monospace!important;color:#00ff9d!important}
+    border-radius:12px!important;padding:16px!important}}
+[data-testid="stMetricValue"]{{font-family:'JetBrains Mono',monospace!important;color:#00ff9d!important}}
 
-.label-tag{font-size:10px;letter-spacing:3px;text-transform:uppercase;
-    color:#444466;margin-bottom:8px;font-family:'JetBrains Mono',monospace}
-.hero-pct{font-family:'Syne',sans-serif;font-size:56px;font-weight:800;letter-spacing:-2px;line-height:1}
-.divider{border:none;border-top:1px solid #1c1c30;margin:10px 0}
-.regime-bull{background:#00ff9d18;border:1px solid #00ff9d44;border-radius:10px;padding:12px 16px;color:#00ff9d;font-weight:700}
-.regime-bear{background:#ff446618;border:1px solid #ff446644;border-radius:10px;padding:12px 16px;color:#ff4466;font-weight:700}
-.regime-lat{background:#f59e0b18;border:1px solid #f59e0b44;border-radius:10px;padding:12px 16px;color:#f59e0b;font-weight:700}
+.label-tag{{font-size:10px;letter-spacing:3px;text-transform:uppercase;
+    color:#444466;margin-bottom:8px;font-family:'JetBrains Mono',monospace}}
+.hero-pct{{font-family:'Syne',sans-serif;font-size:56px;font-weight:800;letter-spacing:-2px;line-height:1}}
+.divider{{border:none;border-top:1px solid #1c1c30;margin:10px 0}}
+.regime-bull{{background:#00ff9d18;border:1px solid #00ff9d44;border-radius:10px;padding:12px 16px;color:#00ff9d;font-weight:700}}
+.regime-bear{{background:#ff446618;border:1px solid #ff446644;border-radius:10px;padding:12px 16px;color:#ff4466;font-weight:700}}
+.regime-lat{{background:#f59e0b18;border:1px solid #f59e0b44;border-radius:10px;padding:12px 16px;color:#f59e0b;font-weight:700}}
 
-.stock-card-rocket{background:linear-gradient(135deg,#00ff9d22,#00ff9d06);border:1px solid #00ff9d66;border-left:4px solid #00ff9d;border-radius:12px;padding:12px 14px;margin-bottom:8px;box-shadow:0 0 18px #00ff9d22}
-.stock-card-up{background:linear-gradient(135deg,#22c55e22,#22c55e06);border:1px solid #22c55e55;border-left:4px solid #22c55e;border-radius:12px;padding:12px 14px;margin-bottom:8px}
-.stock-card-neutral{background:linear-gradient(135deg,#f59e0b18,#f59e0b05);border:1px solid #f59e0b44;border-left:4px solid #f59e0b;border-radius:12px;padding:12px 14px;margin-bottom:8px}
-.stock-card-down{background:linear-gradient(135deg,#ef444418,#ef444405);border:1px solid #ef444455;border-left:4px solid #ef4444;border-radius:12px;padding:12px 14px;margin-bottom:8px}
-.stock-card-crash{background:linear-gradient(135deg,#ff004433,#ff004410);border:1px solid #ff0044;border-left:4px solid #ff0044;border-radius:12px;padding:12px 14px;margin-bottom:8px;box-shadow:0 0 18px #ff004433;animation:pulse-red 2s infinite}
-@keyframes pulse-red{0%,100%{box-shadow:0 0 12px #ff004433}50%{box-shadow:0 0 28px #ff004466}}
-</style>
-""", unsafe_allow_html=True)
+.stock-card-rocket{{background:linear-gradient(135deg,#00ff9d22,#00ff9d06);border:1px solid #00ff9d66;border-left:4px solid #00ff9d;border-radius:12px;padding:12px 14px;margin-bottom:8px;box-shadow:0 0 18px #00ff9d22}}
+.stock-card-up{{background:linear-gradient(135deg,#22c55e22,#22c55e06);border:1px solid #22c55e55;border-left:4px solid #22c55e;border-radius:12px;padding:12px 14px;margin-bottom:8px}}
+.stock-card-neutral{{background:linear-gradient(135deg,#f59e0b18,#f59e0b05);border:1px solid #f59e0b44;border-left:4px solid #f59e0b;border-radius:12px;padding:12px 14px;margin-bottom:8px}}
+.stock-card-down{{background:linear-gradient(135deg,#ef444418,#ef444405);border:1px solid #ef444455;border-left:4px solid #ef4444;border-radius:12px;padding:12px 14px;margin-bottom:8px}}
+.stock-card-crash{{background:linear-gradient(135deg,#ff004433,#ff004410);border:1px solid #ff0044;border-left:4px solid #ff0044;border-radius:12px;padding:12px 14px;margin-bottom:8px;box-shadow:0 0 18px #ff004433;animation:pulse-red 2s infinite}}
+@keyframes pulse-red{{0%,100%{{box-shadow:0 0 12px #ff004433}}50%{{box-shadow:0 0 28px #ff004466}}}}
 
-# ── Edge line toggle — siempre visible, funciona sin depender del botón nativo ──
-st.markdown("""
-<style>
-/* Edge line — la línea vertical clickeable */
-#edge-line {
+/* ── Botón edge — siempre en pantalla principal, no en sidebar ── */
+.edge-btn-container {{
     position: fixed;
     top: 0;
     left: 0;
-    width: 6px;
     height: 100vh;
-    z-index: 999999;
-    cursor: pointer;
-    transition: width 0.2s ease, background 0.2s ease, left 0.3s ease;
+    width: 28px;
+    z-index: 99999;
+    pointer-events: none;
+}}
+.edge-line {{
+    position: absolute;
+    top: 0; left: 13px;
+    width: 2px; height: 100%;
     background: linear-gradient(180deg,
-        transparent 0%,
-        #00ff9d44 20%,
-        #00ff9d 50%,
-        #00ff9d44 80%,
-        transparent 100%
-    );
-}
-#edge-line:hover {
-    width: 10px;
-    background: linear-gradient(180deg,
-        transparent 0%,
-        #00ff9daa 20%,
-        #00ff9d 50%,
-        #00ff9daa 80%,
-        transparent 100%
-    );
-    box-shadow: 2px 0 20px #00ff9d88;
-}
-
-/* Chevron flotante en el centro de la línea */
-#edge-chevron {
-    position: fixed;
-    top: 50%;
-    left: 0px;
+        transparent 0%, #00ff9d55 25%, #00ff9d 50%, #00ff9d55 75%, transparent 100%);
+    pointer-events: none;
+}}
+.edge-tab {{
+    position: absolute;
+    top: 50%; left: 0;
     transform: translateY(-50%);
-    z-index: 9999999;
-    width: 20px;
-    height: 44px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: #00ff9d;
-    border-radius: 0 8px 8px 0;
-    cursor: pointer;
-    box-shadow: 3px 0 16px #00ff9d66;
-    transition: left 0.3s ease, width 0.2s, box-shadow 0.2s;
-    font-size: 11px;
-    color: #080810;
-    font-weight: 900;
-    pointer-events: all;
+    width: 28px; height: 56px;
+    background: linear-gradient(160deg,#00ff9d,#00cc7a);
+    border-radius: 0 10px 10px 0;
+    box-shadow: 3px 0 18px #00ff9d66;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 900; color: #080810;
+    cursor: pointer; pointer-events: all;
+    transition: width 0.15s, box-shadow 0.15s;
     user-select: none;
-}
-#edge-chevron:hover {
-    width: 26px;
-    box-shadow: 4px 0 28px #00ff9daa;
-}
+}}
+.edge-tab:hover {{
+    width: 36px;
+    box-shadow: 4px 0 28px #00ff9dbb;
+}}
 </style>
-
-<!-- La línea edge -->
-<div id="edge-line" onclick="ailinotogglesidebar()" title="Mostrar/Ocultar panel"></div>
-<!-- El chevron -->
-<div id="edge-chevron" onclick="ailinotogglesidebar()">❯</div>
-
-<script>
-(function() {
-    var sidebarOpen = true;
-    var SIDEBAR_W   = 310; // ancho del sidebar en px
-
-    var edgeLine    = document.getElementById('edge-line');
-    var chevron     = document.getElementById('edge-chevron');
-
-    function getSidebar() {
-        return (
-            document.querySelector('[data-testid="stSidebar"]') ||
-            document.querySelector('section[data-testid="stSidebar"]')
-        );
-    }
-
-    function getMainContent() {
-        return (
-            document.querySelector('[data-testid="stMain"]') ||
-            document.querySelector('.main') ||
-            document.querySelector('[data-testid="stAppViewContainer"] > section:last-child')
-        );
-    }
-
-    function applyState(open, animate) {
-        var sidebar = getSidebar();
-        var main    = getMainContent();
-        if (!sidebar) return;
-
-        if (animate) {
-            sidebar.style.transition = 'transform 0.3s ease, margin-left 0.3s ease';
-        }
-
-        if (open) {
-            // Mostrar sidebar
-            sidebar.style.transform   = 'translateX(0)';
-            sidebar.style.marginLeft  = '0';
-            sidebar.style.display     = '';
-            sidebar.style.visibility  = 'visible';
-            sidebar.style.opacity     = '1';
-            sidebar.style.width       = SIDEBAR_W + 'px';
-            sidebar.style.minWidth    = SIDEBAR_W + 'px';
-            sidebar.style.position    = '';
-
-            // Mover edge y chevron
-            if (edgeLine)  edgeLine.style.left  = SIDEBAR_W + 'px';
-            if (chevron) {
-                chevron.style.left      = SIDEBAR_W + 'px';
-                chevron.innerHTML       = '❮';
-            }
-        } else {
-            // Ocultar sidebar deslizándolo
-            sidebar.style.transform   = 'translateX(-' + (SIDEBAR_W + 20) + 'px)';
-            sidebar.style.marginLeft  = '-' + (SIDEBAR_W + 20) + 'px';
-            sidebar.style.minWidth    = '0';
-            sidebar.style.width       = '0';
-            sidebar.style.overflow    = 'hidden';
-
-            // Mover edge y chevron al borde izquierdo
-            if (edgeLine)  edgeLine.style.left  = '0px';
-            if (chevron) {
-                chevron.style.left      = '0px';
-                chevron.innerHTML       = '❯';
-            }
-        }
-    }
-
-    window.ailinotogglesidebar = function() {
-        sidebarOpen = !sidebarOpen;
-        applyState(sidebarOpen, true);
-    };
-
-    // Init: esperar a que el sidebar exista
-    function init() {
-        var sidebar = getSidebar();
-        if (!sidebar) return false;
-
-        // Forzar estilos base en el sidebar
-        sidebar.style.transition = 'transform 0.3s ease, margin-left 0.3s ease';
-        sidebar.style.overflow   = 'hidden';
-
-        applyState(true, false);
-        return true;
-    }
-
-    // Reintentar hasta que el DOM esté listo
-    var tries = 0;
-    var poll = setInterval(function() {
-        tries++;
-        if (init() || tries > 30) clearInterval(poll);
-    }, 200);
-})();
-</script>
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────
@@ -574,7 +432,58 @@ BENCHMARKS = {
 PERIODOS = {"1 semana":"5d","1 mes":"1mo","6 meses":"6mo","1 año":"1y","Máx":"5y"}
 
 # ─────────────────────────────────────────
-#  SIDEBAR
+#  BOTÓN EDGE — Python puro, siempre funciona
+# ─────────────────────────────────────────
+# Se coloca en el área principal ANTES del sidebar
+# para que siempre sea visible sin importar el estado
+
+chevron_icon = "❮" if st.session_state.sidebar_open else "❯"
+edge_label   = f"{chevron_icon}"
+
+# Contenedor edge fijo en el borde izquierdo
+st.markdown(f"""
+<div class="edge-btn-container">
+    <div class="edge-line"></div>
+</div>
+""", unsafe_allow_html=True)
+
+# El botón real de Streamlit — único método confiable de toggle
+with st.sidebar:
+    # Botón de colapso dentro del sidebar (arriba del todo)
+    if st.button("❮  Ocultar panel", key="close_sidebar", use_container_width=True):
+        st.session_state.sidebar_open = False
+        st.rerun()
+
+# Botón flotante siempre visible cuando el sidebar está cerrado
+if not st.session_state.sidebar_open:
+    col_edge, col_main = st.columns([0.001, 0.999])
+    with col_edge:
+        pass
+    # Botón pequeño en top-left del área principal
+    with st.container():
+        st.markdown("""
+        <style>
+        div[data-testid="stVerticalBlock"] > div:first-child .stButton > button {
+            position: fixed !important;
+            top: 50% !important;
+            left: 0 !important;
+            transform: translateY(-50%) !important;
+            z-index: 99999 !important;
+            width: 28px !important;
+            height: 56px !important;
+            padding: 0 !important;
+            border-radius: 0 10px 10px 0 !important;
+            font-size: 14px !important;
+            min-height: unset !important;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+        if st.button("❯", key="open_sidebar_edge"):
+            st.session_state.sidebar_open = True
+            st.rerun()
+
+# ─────────────────────────────────────────
+#  SIDEBAR CONTENIDO
 # ─────────────────────────────────────────
 with st.sidebar:
     st.markdown("""
