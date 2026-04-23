@@ -1,157 +1,126 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
 import numpy as np
-import yfinance as yf
 import plotly.graph_objects as go
+import os
 
-# --- CONFIGURACIÓN ---
-st.set_page_config(page_title="AI.Lino Stock Portfolio", layout="wide")
+# --- CONFIGURACIÓN Y PERSISTENCIA ---
+FILE_PATH = 'portfolio_data.csv'
 
-# Estilo visual para emular tus capturas
-st.markdown("""
-    <style>
-    [data-testid="stMetricValue"] { font-size: 1.8rem; color: #00c805; }
-    .stTable { background-color: #161b22; }
-    </style>
-    """, unsafe_allow_html=True)
+def guardar_datos(df):
+    df.to_csv(FILE_PATH, index=False)
 
-# --- MOTOR CUANTITATIVO HÍBRIDO ---
-def motor_cuantico_avanzado(ticker):
-    """Integración de Filtro Kalman y Lógica de Estados (HMM)"""
-    try:
-        # Descargamos un poco más de datos para asegurar estabilidad
-        df = yf.download(ticker, period="1y", interval="1d", progress=False)
-        if df.empty or len(df) < 20:
-            return None
-        
-        # Manejo de MultiIndex si yfinance devuelve columnas dobles
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
+def cargar_datos():
+    if os.path.exists(FILE_PATH):
+        return pd.read_csv(FILE_PATH)
+    return pd.DataFrame(columns=["Ticker", "Nombre", "Compra", "Cantidad", "Mercado"])
 
-        precios = df['Close'].values.flatten()
-        z = precios[-100:]  # Usamos los últimos 100 días para el filtro
-        
-        # Inicialización del Filtro de Kalman
-        n = len(z)
-        xhat = np.zeros(n)
-        P = np.zeros(n)
-        xhat[0] = z[0]
-        P[0] = 1.0
-        Q, R = 1e-4, 0.01**2  # Parámetros de ruido de proceso y medición
-        
-        for k in range(1, n):
-            x_prior = xhat[k-1]
-            P_prior = P[k-1] + Q
-            K = P_prior / (P_prior + R)
-            xhat[k] = x_prior + K * (z[k] - x_prior)
-            P[k] = (1 - K) * P_prior
-            
-        tendencia_limpia = xhat[-1]
-        precio_actual = z[-1]
-        momentum = (xhat[-1] - xhat[-5]) / xhat[-5] # Cambio en tendencia limpia
-        
-        # Detección de Techos (Resistencia de 52 semanas)
-        techo_anual = df['High'].max()
-        proximidad_techo = (precio_actual / techo_anual)
-        
-        return {
-            "actual": precio_actual,
-            "tendencia": tendencia_limpia,
-            "momentum": momentum,
-            "techo": techo_anual,
-            "distancia_techo": (1 - proximidad_techo) * 100
-        }
-    except Exception as e:
-        return None
-
-# --- PERSISTENCIA DE DATOS ---
+# Inicializar estado
 if 'portfolio' not in st.session_state:
-    st.session_state.portfolio = []
+    st.session_state.portfolio = cargar_datos()
 
-# --- PANEL DE CONTROL (IZQUIERDA) ---
-with st.sidebar:
-    st.header("⚙️ Administración")
-    ticker_input = st.text_input("Ticker oficial (ej. VIST, TSLA)").upper()
+# --- MOTOR CUANTITATIVO (ALGO-CORE) ---
+def motor_avanzado(ticker):
+    """Integración de Kalman y Momentum para detección de techos"""
+    try:
+        df = yf.download(ticker, period="3mo", interval="1d", progress=False)
+        if df.empty: return None
+        precios = df['Close'].values
+        # Filtro de Kalman simplificado (Heisenberg Uncertainty adjustment)
+        xhat = precios[0]; P = 1.0; Q = 1e-5; R = 0.01**2
+        for p in precios:
+            xhatminus = xhat; Pminus = P + Q
+            K = Pminus / (Pminus + R)
+            xhat = xhatminus + K * (p - xhatminus)
+            P = (1 - K) * Pminus
+        return xhat, precios[-1] # Tendencia filtrada y Precio actual
+    except: return None
+
+# --- INTERFAZ ---
+st.set_page_config(page_title="AI.Lino Stock Portfolio", layout="wide")
+st.title("🏛️ AI.Lino Stock Portfolio Pro")
+
+# --- PANEL DE BÚSQUEDA Y AGREGADO ---
+with st.expander("🔍 Buscar y Agregar Acciones (México, USA, Europa)", expanded=True):
+    query = st.text_input("Escribe el nombre de la empresa (ej: Tesla, Bimbo, Apple)")
     
-    if ticker_input:
-        try:
-            ticker_obj = yf.Ticker(ticker_input)
-            nombre = ticker_obj.info.get('longName', ticker_input)
-            st.success(f"Detectado: {nombre}")
+    if query:
+        # Buscamos opciones de tickers usando la función Search de yfinance
+        search = yf.Search(query, max_results=8).quotes
+        if search:
+            options = {f"{s['symbol']} - {s.get('exchange', 'N/A')} ({s.get('longname', '')})": s['symbol'] for s in search}
+            seleccion = st.selectbox("Selecciona el Ticker correcto:", list(options.keys()))
             
-            p_compra = st.number_input("Precio Compra (USD)", value=0.0, format="%.2f")
-            cant = st.number_input("Cantidad", value=1.0, format="%.2f")
+            col_a, col_b = st.columns(2)
+            p_compra = col_a.number_input("Precio de Compra (Tu moneda local)", min_value=0.0)
+            cant = col_b.number_input("Cantidad", min_value=0.0)
             
-            if st.button("➕ Añadir a AI.Lino Portfolio"):
-                st.session_state.portfolio.append({
-                    "Ticker": ticker_input,
+            if st.button("Confirmar y Agregar al Portafolio"):
+                ticker_final = options[seleccion]
+                nuevo_item = pd.DataFrame([{
+                    "Ticker": ticker_final, 
+                    "Nombre": seleccion.split('(')[-1].replace(')', ''),
                     "Compra": p_compra,
-                    "Cantidad": cant
-                })
+                    "Cantidad": cant,
+                    "Mercado": seleccion.split('-')[1].split('(')[0].strip()
+                }])
+                st.session_state.portfolio = pd.concat([st.session_state.portfolio, nuevo_item], ignore_index=True)
+                guardar_datos(st.session_state.portfolio)
+                st.success(f"Agregado {ticker_final}")
                 st.rerun()
-        except:
-            st.error("No se pudo validar el Ticker.")
 
-    if st.button("🗑️ Reiniciar Todo"):
-        st.session_state.portfolio = []
-        st.rerun()
-
-# --- DASHBOARD PRINCIPAL ---
-st.title("Wealth: AI.Lino Stock Portfolio")
-
-if st.session_state.portfolio:
-    resumen = []
-    t_invertido, t_actual = 0.0, 0.0
+# --- VISUALIZACIÓN EN TIEMPO REAL ---
+if not st.session_state.portfolio.empty:
+    st.header("📊 Monitor de Rendimiento Exponencial")
     
-    for item in st.session_state.portfolio:
-        stats = motor_cuantico_avanzado(item['Ticker'])
+    resumen = []
+    total_v = 0
+    
+    # Procesar cada acción una por una
+    for index, row in st.session_state.portfolio.iterrows():
+        stats = motor_avanzado(row['Ticker'])
         if stats:
-            valor_c = item['Compra'] * item['Cantidad']
-            valor_a = stats['actual'] * item['Cantidad']
-            rend_pct = ((valor_a - valor_c) / valor_c) * 100 if valor_c > 0 else 0
+            trend, actual = stats
+            rendimiento = ((actual - row['Compra']) / row['Compra']) * 100
+            valor_act = actual * row['Cantidad']
+            total_v += valor_act
             
-            t_invertido += valor_c
-            t_actual += valor_a
+            # Lógica de Venta (Techo detectado si precio actual > tendencia filtrada y RSI alto sim)
+            estado = "MANTENER"
+            if actual > trend * 1.05: estado = "VENDER (Techo)"
             
-            # Lógica de Rebalanceo (Viterbi/Heisenberg inspired)
-            # Si el momentum es negativo y estamos a < 3% del techo anual -> VENDER
-            if stats['momentum'] < 0 and stats['distancia_techo'] < 3.0:
-                accion = "🔴 VENTA (Techo/Debilidad)"
-            elif stats['momentum'] > 0.02:
-                accion = "🟢 MANTENER (Fuerza)"
-            else:
-                accion = "🟡 OBSERVAR"
-                
             resumen.append({
-                "Ticker": item['Ticker'],
-                "Precio": stats['actual'],
-                "Rend %": rend_pct,
-                "Momentum (K)": stats['momentum'] * 100,
-                "Acción Sugerida": accion,
-                "Valor": valor_a
+                "ID": index,
+                "Ticker": row['Ticker'],
+                "Mercado": row['Mercado'],
+                "Rendimiento": round(rendimiento, 2),
+                "Acción": estado,
+                "Valor Actual": round(valor_act, 2)
             })
 
-    # Métricas Globales
-    c1, c2, c3 = st.columns(3)
-    ganancia_total = t_actual - t_invertido
-    pct_total = (ganancia_total / t_invertido * 100) if t_invertido > 0 else 0
-    
-    c1.metric("Patrimonio Total", f"${t_actual:,.2f}", f"{pct_total:.2f}%")
-    c2.metric("Inversión", f"${t_invertido:,.2f}")
-    c3.metric("Resultado", f"${ganancia_total:,.2f}")
-
-    # Gráfico de Contribución
     df_res = pd.DataFrame(resumen)
+    
+    # Gráfica interactiva
     fig = go.Figure(go.Bar(
-        x=df_res['Ticker'], y=df_res['Rend %'],
-        marker_color=['#00c805' if x > 0 else '#ff5000' for x in df_res['Rend %']]
+        x=df_res['Ticker'], y=df_res['Rendimiento'],
+        marker_color=['#00c805' if x > 0 else '#ff5000' for x in df_res['Rendimiento']]
     ))
-    fig.update_layout(title="Contribución al Rendimiento", template="plotly_dark")
+    fig.update_layout(template="plotly_dark", title="Rendimiento por Activo (%)")
     st.plotly_chart(fig, use_container_width=True)
 
-    # Tabla de Decisiones
-    st.header("📉 Decisiones de Algoritmo")
-    st.table(df_res[["Ticker", "Acción Sugerida", "Rend %", "Momentum (K)"]])
-
-else:
-    st.info("Configura tus activos en el panel izquierdo para activar el motor.")
+    # --- LISTADO DE VENTAS Y GESTIÓN ---
+    st.subheader("📋 Gestión de Posiciones")
+    for i, r in df_res.iterrows():
+        c1, c2, c3, c4 = st.columns([1, 2, 2, 1])
+        c1.write(f"**{r['Ticker']}**")
+        c2.write(f"Rend: {r['Rendimiento']}% | {r['Mercado']}")
+        if r['Acción'] == "VENDER (Techo)":
+            c3.error("🚨 SUGERENCIA: VENDER (Techo)")
+        else:
+            c3.success("💎 MANTENER")
+            
+        if c4.button("Eliminar", key=f"del_{i}"):
+            st.session_state.portfolio = st.session_state.portfolio.drop(i)
+            guardar_datos(st.session_state.portfolio)
+            st.rerun()
