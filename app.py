@@ -142,8 +142,9 @@ html,body,[data-testid="stAppViewContainer"]{
     height: 14px !important;
 }
 
-#MainMenu,footer,header{visibility:hidden}
-[data-testid="stToolbar"]{display:none}
+/* Solo ocultar el menú y footer — NO el header/toolbar donde vive el botón >> */
+#MainMenu { visibility: hidden !important; }
+footer    { visibility: hidden !important; }
 .block-container{padding:0 2rem 2rem 2rem!important;max-width:100%!important}
 
 input[type="text"],input[type="number"],.stTextInput input,.stNumberInput input{
