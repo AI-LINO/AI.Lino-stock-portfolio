@@ -1,1 +1,0 @@
-# AI.Lino-stock-portfolio
