@@ -33,25 +33,257 @@ st.set_page_config(page_title="AI.lino PRO", layout="wide", page_icon="📈")
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@300;400;500&display=swap');
-html,body,[data-testid="stAppViewContainer"]{background:#080810!important;color:#e8e8f0!important;font-family:'Syne',sans-serif!important}
-[data-testid="stSidebar"]{background:#0c0c18!important;border-right:1px solid #1c1c30!important;min-width:290px!important;max-width:290px!important}
-#MainMenu,footer,header{visibility:hidden}
-[data-testid="stToolbar"]{display:none}
-.block-container{padding:0 2rem 2rem 2rem!important;max-width:100%!important}
-input[type="text"],input[type="number"],.stTextInput input,.stNumberInput input{background:#10101e!important;border:1px solid #2a2a44!important;border-radius:8px!important;color:#e8e8f0!important;font-family:'JetBrains Mono',monospace!important;font-size:13px!important}
-[data-testid="stSelectbox"]>div>div{background:#10101e!important;border:1px solid #2a2a44!important;border-radius:8px!important;color:#e8e8f0!important}
-.stButton>button{background:linear-gradient(135deg,#00ff9d18,#00ff9d33)!important;border:1px solid #00ff9d55!important;border-radius:8px!important;color:#00ff9d!important;font-family:'Syne',sans-serif!important;font-weight:700!important;font-size:13px!important}
-.stButton>button:hover{background:linear-gradient(135deg,#00ff9d33,#00ff9d55)!important;box-shadow:0 0 16px #00ff9d33!important}
-.stButton>button[kind="secondary"]{background:transparent!important;border:1px solid #2a2a44!important;color:#666688!important}
-[data-testid="metric-container"]{background:#0e0e1e!important;border:1px solid #1c1c30!important;border-radius:12px!important;padding:16px!important}
+
+html,body,[data-testid="stAppViewContainer"]{
+    background:#080810!important;color:#e8e8f0!important;font-family:'Syne',sans-serif!important}
+
+[data-testid="stSidebar"]{
+    background:#0c0c18!important;
+    border-right:1px solid #1c1c30!important;
+    min-width:300px!important;max-width:300px!important;
+}
+
+/* Ocultar el botón nativo de streamlit — usaremos el nuestro */
+[data-testid="stSidebarCollapsedControl"]{ display:none!important; }
+button[kind="header"]{ display:none!important; }
+
+/* Botón flotante personalizado — siempre visible */
+#ailino-toggle {
+    position: fixed;
+    top: 50%;
+    left: 0;
+    transform: translateY(-50%);
+    z-index: 99999;
+    background: linear-gradient(160deg, #00ff9d, #00cc7a);
+    border: none;
+    border-radius: 0 14px 14px 0;
+    padding: 18px 10px;
+    cursor: pointer;
+    box-shadow: 4px 0 24px #00ff9d55;
+    transition: all 0.25s ease;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    font-weight: 700;
+    color: #080810;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    line-height: 1;
+}
+#ailino-toggle:hover {
+    padding: 18px 14px;
+    box-shadow: 6px 0 36px #00ff9daa;
+    background: linear-gradient(160deg, #00ffb3, #00ff9d);
+}
+#ailino-toggle .arrow { font-size: 16px; line-height: 1; }
+
+#MainMenu,footer,header{ visibility:hidden }
+[data-testid="stToolbar"]{ display:none }
+.block-container{ padding:0 2rem 2rem 2rem!important; max-width:100%!important }
+
+input[type="text"],input[type="number"],.stTextInput input,.stNumberInput input{
+    background:#10101e!important;border:1px solid #2a2a44!important;
+    border-radius:8px!important;color:#e8e8f0!important;
+    font-family:'JetBrains Mono',monospace!important;font-size:13px!important}
+[data-testid="stSelectbox"]>div>div{
+    background:#10101e!important;border:1px solid #2a2a44!important;
+    border-radius:8px!important;color:#e8e8f0!important}
+
+.stButton>button{
+    background:linear-gradient(135deg,#00ff9d18,#00ff9d33)!important;
+    border:1px solid #00ff9d55!important;border-radius:8px!important;
+    color:#00ff9d!important;font-family:'Syne',sans-serif!important;
+    font-weight:700!important;font-size:13px!important}
+.stButton>button:hover{
+    background:linear-gradient(135deg,#00ff9d33,#00ff9d55)!important;
+    box-shadow:0 0 16px #00ff9d33!important}
+.stButton>button[kind="secondary"]{
+    background:transparent!important;border:1px solid #2a2a44!important;color:#666688!important}
+
+[data-testid="metric-container"]{
+    background:#0e0e1e!important;border:1px solid #1c1c30!important;
+    border-radius:12px!important;padding:16px!important}
 [data-testid="stMetricValue"]{font-family:'JetBrains Mono',monospace!important;color:#00ff9d!important}
-.label-tag{font-size:10px;letter-spacing:3px;text-transform:uppercase;color:#444466;margin-bottom:8px;font-family:'JetBrains Mono',monospace}
+
+.label-tag{font-size:10px;letter-spacing:3px;text-transform:uppercase;
+    color:#444466;margin-bottom:8px;font-family:'JetBrains Mono',monospace}
 .hero-pct{font-family:'Syne',sans-serif;font-size:56px;font-weight:800;letter-spacing:-2px;line-height:1}
 .divider{border:none;border-top:1px solid #1c1c30;margin:10px 0}
 .regime-bull{background:#00ff9d18;border:1px solid #00ff9d44;border-radius:10px;padding:12px 16px;color:#00ff9d;font-weight:700}
 .regime-bear{background:#ff446618;border:1px solid #ff446644;border-radius:10px;padding:12px 16px;color:#ff4466;font-weight:700}
 .regime-lat{background:#f59e0b18;border:1px solid #f59e0b44;border-radius:10px;padding:12px 16px;color:#f59e0b;font-weight:700}
+
+.stock-card-rocket{background:linear-gradient(135deg,#00ff9d22,#00ff9d06);border:1px solid #00ff9d66;border-left:4px solid #00ff9d;border-radius:12px;padding:12px 14px;margin-bottom:8px;box-shadow:0 0 18px #00ff9d22}
+.stock-card-up{background:linear-gradient(135deg,#22c55e22,#22c55e06);border:1px solid #22c55e55;border-left:4px solid #22c55e;border-radius:12px;padding:12px 14px;margin-bottom:8px}
+.stock-card-neutral{background:linear-gradient(135deg,#f59e0b18,#f59e0b05);border:1px solid #f59e0b44;border-left:4px solid #f59e0b;border-radius:12px;padding:12px 14px;margin-bottom:8px}
+.stock-card-down{background:linear-gradient(135deg,#ef444418,#ef444405);border:1px solid #ef444455;border-left:4px solid #ef4444;border-radius:12px;padding:12px 14px;margin-bottom:8px}
+.stock-card-crash{background:linear-gradient(135deg,#ff004433,#ff004410);border:1px solid #ff0044;border-left:4px solid #ff0044;border-radius:12px;padding:12px 14px;margin-bottom:8px;box-shadow:0 0 18px #ff004433;animation:pulse-red 2s infinite}
+@keyframes pulse-red{0%,100%{box-shadow:0 0 12px #ff004433}50%{box-shadow:0 0 28px #ff004466}}
 </style>
+""", unsafe_allow_html=True)
+
+# ── Edge line toggle — siempre visible, funciona sin depender del botón nativo ──
+st.markdown("""
+<style>
+/* Edge line — la línea vertical clickeable */
+#edge-line {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 6px;
+    height: 100vh;
+    z-index: 999999;
+    cursor: pointer;
+    transition: width 0.2s ease, background 0.2s ease, left 0.3s ease;
+    background: linear-gradient(180deg,
+        transparent 0%,
+        #00ff9d44 20%,
+        #00ff9d 50%,
+        #00ff9d44 80%,
+        transparent 100%
+    );
+}
+#edge-line:hover {
+    width: 10px;
+    background: linear-gradient(180deg,
+        transparent 0%,
+        #00ff9daa 20%,
+        #00ff9d 50%,
+        #00ff9daa 80%,
+        transparent 100%
+    );
+    box-shadow: 2px 0 20px #00ff9d88;
+}
+
+/* Chevron flotante en el centro de la línea */
+#edge-chevron {
+    position: fixed;
+    top: 50%;
+    left: 0px;
+    transform: translateY(-50%);
+    z-index: 9999999;
+    width: 20px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #00ff9d;
+    border-radius: 0 8px 8px 0;
+    cursor: pointer;
+    box-shadow: 3px 0 16px #00ff9d66;
+    transition: left 0.3s ease, width 0.2s, box-shadow 0.2s;
+    font-size: 11px;
+    color: #080810;
+    font-weight: 900;
+    pointer-events: all;
+    user-select: none;
+}
+#edge-chevron:hover {
+    width: 26px;
+    box-shadow: 4px 0 28px #00ff9daa;
+}
+</style>
+
+<!-- La línea edge -->
+<div id="edge-line" onclick="ailinotogglesidebar()" title="Mostrar/Ocultar panel"></div>
+<!-- El chevron -->
+<div id="edge-chevron" onclick="ailinotogglesidebar()">❯</div>
+
+<script>
+(function() {
+    var sidebarOpen = true;
+    var SIDEBAR_W   = 310; // ancho del sidebar en px
+
+    var edgeLine    = document.getElementById('edge-line');
+    var chevron     = document.getElementById('edge-chevron');
+
+    function getSidebar() {
+        return (
+            document.querySelector('[data-testid="stSidebar"]') ||
+            document.querySelector('section[data-testid="stSidebar"]')
+        );
+    }
+
+    function getMainContent() {
+        return (
+            document.querySelector('[data-testid="stMain"]') ||
+            document.querySelector('.main') ||
+            document.querySelector('[data-testid="stAppViewContainer"] > section:last-child')
+        );
+    }
+
+    function applyState(open, animate) {
+        var sidebar = getSidebar();
+        var main    = getMainContent();
+        if (!sidebar) return;
+
+        if (animate) {
+            sidebar.style.transition = 'transform 0.3s ease, margin-left 0.3s ease';
+        }
+
+        if (open) {
+            // Mostrar sidebar
+            sidebar.style.transform   = 'translateX(0)';
+            sidebar.style.marginLeft  = '0';
+            sidebar.style.display     = '';
+            sidebar.style.visibility  = 'visible';
+            sidebar.style.opacity     = '1';
+            sidebar.style.width       = SIDEBAR_W + 'px';
+            sidebar.style.minWidth    = SIDEBAR_W + 'px';
+            sidebar.style.position    = '';
+
+            // Mover edge y chevron
+            if (edgeLine)  edgeLine.style.left  = SIDEBAR_W + 'px';
+            if (chevron) {
+                chevron.style.left      = SIDEBAR_W + 'px';
+                chevron.innerHTML       = '❮';
+            }
+        } else {
+            // Ocultar sidebar deslizándolo
+            sidebar.style.transform   = 'translateX(-' + (SIDEBAR_W + 20) + 'px)';
+            sidebar.style.marginLeft  = '-' + (SIDEBAR_W + 20) + 'px';
+            sidebar.style.minWidth    = '0';
+            sidebar.style.width       = '0';
+            sidebar.style.overflow    = 'hidden';
+
+            // Mover edge y chevron al borde izquierdo
+            if (edgeLine)  edgeLine.style.left  = '0px';
+            if (chevron) {
+                chevron.style.left      = '0px';
+                chevron.innerHTML       = '❯';
+            }
+        }
+    }
+
+    window.ailinotogglesidebar = function() {
+        sidebarOpen = !sidebarOpen;
+        applyState(sidebarOpen, true);
+    };
+
+    // Init: esperar a que el sidebar exista
+    function init() {
+        var sidebar = getSidebar();
+        if (!sidebar) return false;
+
+        // Forzar estilos base en el sidebar
+        sidebar.style.transition = 'transform 0.3s ease, margin-left 0.3s ease';
+        sidebar.style.overflow   = 'hidden';
+
+        applyState(true, false);
+        return true;
+    }
+
+    // Reintentar hasta que el DOM esté listo
+    var tries = 0;
+    var poll = setInterval(function() {
+        tries++;
+        if (init() || tries > 30) clearInterval(poll);
+    }, 200);
+})();
+</script>
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────
@@ -412,32 +644,95 @@ with st.sidebar:
 
     port = st.session_state.portfolio.reset_index(drop=True)
     if port.empty:
-        st.markdown("<div style='color:#444466;font-size:13px'>Portafolio vacío ↑</div>", unsafe_allow_html=True)
+        st.markdown("<div style='color:#444466;font-size:13px;padding:8px 0'>Portafolio vacío ↑</div>",
+                    unsafe_allow_html=True)
     else:
         for i in range(len(port)):
             row   = port.iloc[i]
             stats = motor_avanzado(row["Ticker"])
             if stats:
-                _,actual = stats
-                rend = ((actual-float(row["Compra"]))/float(row["Compra"])*100) if float(row["Compra"])>0 else 0
-                badge = "badge-up" if rend>=0 else "badge-down"
-                rstr  = f"{'▲' if rend>=0 else '▼'} {abs(rend):.2f}%"
+                _, actual = stats
+                compra = float(row["Compra"])
+                rend   = ((actual - compra) / compra * 100) if compra > 0 else 0.0
             else:
-                badge,rstr = "badge-neu","—"
-            c1,c2 = st.columns([3,2])
-            c1.markdown(f"<div style='font-weight:700;font-size:14px'>{row['Ticker']}</div>"
-                        f"<div style='font-size:11px;color:#444466;font-family:JetBrains Mono'>{row['Mercado']}</div>",
-                        unsafe_allow_html=True)
-            c2.markdown(f"<div class='{badge}' style='text-align:right;margin-top:4px'>{rstr}</div>",
-                        unsafe_allow_html=True)
-            if st.button("✕", key=f"del_{row['Ticker']}", help="Eliminar"):
+                rend = None
+
+            # ── Paleta de colores por nivel de rendimiento ──
+            if rend is None:
+                card_class = "stock-card-neutral"
+                emoji      = "⚪"
+                rend_str   = "Sin datos"
+                rend_color = "#888"
+                barra_pct  = 50
+                barra_color= "#888"
+            elif rend >= 15:
+                card_class = "stock-card-rocket"
+                emoji      = "🚀"
+                rend_str   = f"▲ {rend:.2f}%"
+                rend_color = "#00ff9d"
+                barra_pct  = min(100, int(rend * 2))
+                barra_color= "#00ff9d"
+            elif rend >= 5:
+                card_class = "stock-card-up"
+                emoji      = "📈"
+                rend_str   = f"▲ {rend:.2f}%"
+                rend_color = "#22c55e"
+                barra_pct  = min(100, int(rend * 4))
+                barra_color= "#22c55e"
+            elif rend >= -3:
+                card_class = "stock-card-neutral"
+                emoji      = "↔️"
+                rend_str   = f"{'▲' if rend>=0 else '▼'} {abs(rend):.2f}%"
+                rend_color = "#f59e0b"
+                barra_pct  = 50
+                barra_color= "#f59e0b"
+            elif rend >= -10:
+                card_class = "stock-card-down"
+                emoji      = "📉"
+                rend_str   = f"▼ {abs(rend):.2f}%"
+                rend_color = "#ef4444"
+                barra_pct  = max(0, int(50 + rend * 2))
+                barra_color= "#ef4444"
+            else:
+                card_class = "stock-card-crash"
+                emoji      = "🔴"
+                rend_str   = f"▼ {abs(rend):.2f}%"
+                rend_color = "#ff0044"
+                barra_pct  = max(0, int(50 + rend))
+                barra_color= "#ff0044"
+
+            st.markdown(f"""
+            <div class='{card_class}'>
+                <div style='display:flex;justify-content:space-between;align-items:flex-start'>
+                    <div>
+                        <span style='font-size:16px'>{emoji}</span>
+                        <span style='font-weight:800;font-size:15px;margin-left:6px'>{row['Ticker']}</span>
+                        <div style='font-size:10px;color:#556;font-family:JetBrains Mono;
+                                    margin-top:2px;letter-spacing:1px'>{row['Mercado']}</div>
+                    </div>
+                    <div style='text-align:right'>
+                        <div style='font-family:JetBrains Mono;font-size:15px;
+                                    font-weight:700;color:{rend_color}'>{rend_str}</div>
+                        <div style='font-size:10px;color:#556;font-family:JetBrains Mono'>
+                            {row['Cantidad']} acc · ${float(row['Compra']):.2f}
+                        </div>
+                    </div>
+                </div>
+                <div style='margin-top:8px;background:#ffffff11;border-radius:4px;height:4px;overflow:hidden'>
+                    <div style='width:{barra_pct}%;height:100%;
+                                background:{barra_color};border-radius:4px;
+                                transition:width 0.5s ease'></div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            if st.button("✕ Eliminar", key=f"del_{row['Ticker']}", use_container_width=True):
                 st.session_state.portfolio = (
                     st.session_state.portfolio.reset_index(drop=True)
                     .drop(index=i).reset_index(drop=True)
                 )
                 guardar_datos(st.session_state.portfolio)
                 st.rerun()
-            st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════
 #  VISTAS PRINCIPALES
