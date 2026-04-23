@@ -37,53 +37,71 @@ st.markdown("""
 html,body,[data-testid="stAppViewContainer"]{
     background:#080810!important;color:#e8e8f0!important;font-family:'Syne',sans-serif!important}
 
+/* ── Sidebar base ── */
 [data-testid="stSidebar"]{
     background:#0c0c18!important;
     border-right:1px solid #1c1c30!important;
     min-width:300px!important;max-width:300px!important;
+    transition: transform 0.3s ease, width 0.3s ease!important;
 }
 
-/* Ocultar el botón nativo de streamlit — usaremos el nuestro */
-[data-testid="stSidebarCollapsedControl"]{ display:none!important; }
-button[kind="header"]{ display:none!important; }
-
-/* Botón flotante personalizado — siempre visible */
-#ailino-toggle {
-    position: fixed;
-    top: 50%;
-    left: 0;
-    transform: translateY(-50%);
-    z-index: 99999;
-    background: linear-gradient(160deg, #00ff9d, #00cc7a);
-    border: none;
-    border-radius: 0 14px 14px 0;
-    padding: 18px 10px;
-    cursor: pointer;
-    box-shadow: 4px 0 24px #00ff9d55;
-    transition: all 0.25s ease;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 6px;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 9px;
-    font-weight: 700;
-    color: #080810;
-    letter-spacing: 1px;
-    text-transform: uppercase;
-    line-height: 1;
+/* ── Botón nativo del sidebar (la flechita de Streamlit) — hacerlo siempre visible y colorido ── */
+[data-testid="stSidebarCollapsedControl"] {
+    display: flex!important;
+    visibility: visible!important;
+    opacity: 1!important;
+    position: fixed!important;
+    top: 50%!important;
+    left: 0px!important;
+    transform: translateY(-50%)!important;
+    z-index: 9999!important;
+    background: linear-gradient(135deg, #00ff9d, #00cc7a)!important;
+    border-radius: 0 12px 12px 0!important;
+    padding: 14px 8px!important;
+    box-shadow: 4px 0 20px #00ff9d55!important;
+    cursor: pointer!important;
+    transition: all 0.2s ease!important;
 }
-#ailino-toggle:hover {
-    padding: 18px 14px;
-    box-shadow: 6px 0 36px #00ff9daa;
-    background: linear-gradient(160deg, #00ffb3, #00ff9d);
+[data-testid="stSidebarCollapsedControl"]:hover {
+    background: linear-gradient(135deg, #00ffb3, #00ff9d)!important;
+    box-shadow: 4px 0 30px #00ff9d88!important;
+    padding: 14px 12px!important;
 }
-#ailino-toggle .arrow { font-size: 16px; line-height: 1; }
+[data-testid="stSidebarCollapsedControl"] svg {
+    fill: #080810!important;
+    width: 18px!important; height: 18px!important;
+}
 
-#MainMenu,footer,header{ visibility:hidden }
-[data-testid="stToolbar"]{ display:none }
-.block-container{ padding:0 2rem 2rem 2rem!important; max-width:100%!important }
+/* ── Botón toggle cuando sidebar está ABIERTO (flecha hacia la izquierda) ── */
+[data-testid="stSidebarContent"] > div:first-child button,
+[data-testid="stSidebar"] [data-testid="stSidebarNav"] + div button {
+    background: transparent!important;
+}
+/* La flecha que aparece dentro del sidebar para cerrarlo */
+button[kind="header"] {
+    background: linear-gradient(135deg,#00ff9d,#00cc7a)!important;
+    border-radius: 0 10px 10px 0!important;
+    position: fixed!important;
+    top: 50%!important;
+    left: 290px!important;
+    transform: translateY(-50%)!important;
+    z-index: 9999!important;
+    padding: 14px 8px!important;
+    box-shadow: 4px 0 20px #00ff9d55!important;
+    border: none!important;
+    cursor: pointer!important;
+    transition: all 0.2s!important;
+}
+button[kind="header"] svg { fill: #080810!important; }
+button[kind="header"]:hover {
+    box-shadow: 4px 0 30px #00ff9d88!important;
+}
 
+#MainMenu,footer,header{visibility:hidden}
+[data-testid="stToolbar"]{display:none}
+.block-container{padding:0 2rem 2rem 2rem!important;max-width:100%!important}
+
+/* ── Inputs ── */
 input[type="text"],input[type="number"],.stTextInput input,.stNumberInput input{
     background:#10101e!important;border:1px solid #2a2a44!important;
     border-radius:8px!important;color:#e8e8f0!important;
@@ -92,6 +110,7 @@ input[type="text"],input[type="number"],.stTextInput input,.stNumberInput input{
     background:#10101e!important;border:1px solid #2a2a44!important;
     border-radius:8px!important;color:#e8e8f0!important}
 
+/* ── Botones ── */
 .stButton>button{
     background:linear-gradient(135deg,#00ff9d18,#00ff9d33)!important;
     border:1px solid #00ff9d55!important;border-radius:8px!important;
@@ -103,11 +122,13 @@ input[type="text"],input[type="number"],.stTextInput input,.stNumberInput input{
 .stButton>button[kind="secondary"]{
     background:transparent!important;border:1px solid #2a2a44!important;color:#666688!important}
 
+/* ── Metrics ── */
 [data-testid="metric-container"]{
     background:#0e0e1e!important;border:1px solid #1c1c30!important;
     border-radius:12px!important;padding:16px!important}
 [data-testid="stMetricValue"]{font-family:'JetBrains Mono',monospace!important;color:#00ff9d!important}
 
+/* ── Utilidades ── */
 .label-tag{font-size:10px;letter-spacing:3px;text-transform:uppercase;
     color:#444466;margin-bottom:8px;font-family:'JetBrains Mono',monospace}
 .hero-pct{font-family:'Syne',sans-serif;font-size:56px;font-weight:800;letter-spacing:-2px;line-height:1}
@@ -116,96 +137,40 @@ input[type="text"],input[type="number"],.stTextInput input,.stNumberInput input{
 .regime-bear{background:#ff446618;border:1px solid #ff446644;border-radius:10px;padding:12px 16px;color:#ff4466;font-weight:700}
 .regime-lat{background:#f59e0b18;border:1px solid #f59e0b44;border-radius:10px;padding:12px 16px;color:#f59e0b;font-weight:700}
 
-.stock-card-rocket{background:linear-gradient(135deg,#00ff9d22,#00ff9d06);border:1px solid #00ff9d66;border-left:4px solid #00ff9d;border-radius:12px;padding:12px 14px;margin-bottom:8px;box-shadow:0 0 18px #00ff9d22}
-.stock-card-up{background:linear-gradient(135deg,#22c55e22,#22c55e06);border:1px solid #22c55e55;border-left:4px solid #22c55e;border-radius:12px;padding:12px 14px;margin-bottom:8px}
-.stock-card-neutral{background:linear-gradient(135deg,#f59e0b18,#f59e0b05);border:1px solid #f59e0b44;border-left:4px solid #f59e0b;border-radius:12px;padding:12px 14px;margin-bottom:8px}
-.stock-card-down{background:linear-gradient(135deg,#ef444418,#ef444405);border:1px solid #ef444455;border-left:4px solid #ef4444;border-radius:12px;padding:12px 14px;margin-bottom:8px}
-.stock-card-crash{background:linear-gradient(135deg,#ff004433,#ff004410);border:1px solid #ff0044;border-left:4px solid #ff0044;border-radius:12px;padding:12px 14px;margin-bottom:8px;box-shadow:0 0 18px #ff004433;animation:pulse-red 2s infinite}
-@keyframes pulse-red{0%,100%{box-shadow:0 0 12px #ff004433}50%{box-shadow:0 0 28px #ff004466}}
+/* ── Stock cards coloridas ── */
+.stock-card-rocket {
+    background: linear-gradient(135deg,#00ff9d22,#00ff9d08);
+    border:1px solid #00ff9d66; border-left:4px solid #00ff9d;
+    border-radius:12px; padding:12px 14px; margin-bottom:8px;
+    box-shadow: 0 0 18px #00ff9d22;
+}
+.stock-card-up {
+    background: linear-gradient(135deg,#22c55e22,#22c55e08);
+    border:1px solid #22c55e55; border-left:4px solid #22c55e;
+    border-radius:12px; padding:12px 14px; margin-bottom:8px;
+}
+.stock-card-neutral {
+    background: linear-gradient(135deg,#f59e0b18,#f59e0b05);
+    border:1px solid #f59e0b44; border-left:4px solid #f59e0b;
+    border-radius:12px; padding:12px 14px; margin-bottom:8px;
+}
+.stock-card-down {
+    background: linear-gradient(135deg,#ef444418,#ef444405);
+    border:1px solid #ef444455; border-left:4px solid #ef4444;
+    border-radius:12px; padding:12px 14px; margin-bottom:8px;
+}
+.stock-card-crash {
+    background: linear-gradient(135deg,#ff004433,#ff004410);
+    border:1px solid #ff0044; border-left:4px solid #ff0044;
+    border-radius:12px; padding:12px 14px; margin-bottom:8px;
+    box-shadow: 0 0 18px #ff004433;
+    animation: pulse-red 2s infinite;
+}
+@keyframes pulse-red {
+    0%,100%{box-shadow:0 0 12px #ff004433}
+    50%{box-shadow:0 0 28px #ff004466}
+}
 </style>
-""", unsafe_allow_html=True)
-
-# ── Botón flotante + JS que clickea el sidebar nativo de Streamlit ──
-st.markdown("""
-<button id="ailino-toggle" onclick="toggleSidebar()" title="Abrir/Cerrar panel">
-    <span class="arrow" id="toggle-arrow">▶</span>
-    <span>PANEL</span>
-</button>
-
-<script>
-(function() {
-    // Esperar a que Streamlit cargue completamente
-    function init() {
-        var btn = document.getElementById('ailino-toggle');
-        if (!btn) return;
-
-        // Detectar estado actual del sidebar
-        function getSidebarOpen() {
-            var sidebar = document.querySelector('[data-testid="stSidebar"]');
-            if (!sidebar) return false;
-            var rect = sidebar.getBoundingClientRect();
-            return rect.left >= -10; // visible si está en pantalla
-        }
-
-        // Actualizar posición y flecha del botón
-        function updateBtn() {
-            var sidebar = document.querySelector('[data-testid="stSidebar"]');
-            var arrow   = document.getElementById('toggle-arrow');
-            if (!sidebar || !btn || !arrow) return;
-            var open = getSidebarOpen();
-            if (open) {
-                var w = sidebar.getBoundingClientRect().width || 300;
-                btn.style.left = w + 'px';
-                arrow.textContent = '◀';
-            } else {
-                btn.style.left = '0px';
-                arrow.textContent = '▶';
-            }
-        }
-
-        window.toggleSidebar = function() {
-            // Buscar el botón nativo de Streamlit y clickearlo
-            var nativeBtn = (
-                document.querySelector('[data-testid="stSidebarCollapsedControl"] button') ||
-                document.querySelector('button[kind="header"]') ||
-                document.querySelector('[data-testid="stSidebar"] button[aria-label]') ||
-                document.querySelector('section[data-testid="stSidebar"] > div > div > button')
-            );
-            if (nativeBtn) {
-                nativeBtn.click();
-            } else {
-                // Fallback: toggle clase CSS en el sidebar
-                var sidebar = document.querySelector('[data-testid="stSidebar"]');
-                if (sidebar) {
-                    var isOpen = getSidebarOpen();
-                    sidebar.style.marginLeft = isOpen ? '-320px' : '0px';
-                    sidebar.style.transition = 'margin-left 0.3s ease';
-                }
-            }
-            setTimeout(updateBtn, 350);
-        };
-
-        // Actualizar posición al cargar y cuando cambia el sidebar
-        updateBtn();
-        setInterval(updateBtn, 500);
-
-        // Observer para detectar cambios en el sidebar
-        var observer = new MutationObserver(function() { setTimeout(updateBtn, 100); });
-        var appContainer = document.querySelector('[data-testid="stAppViewContainer"]');
-        if (appContainer) {
-            observer.observe(appContainer, { subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
-        }
-    }
-
-    // Intentar init varias veces hasta que el DOM esté listo
-    var attempts = 0;
-    var interval = setInterval(function() {
-        attempts++;
-        init();
-        if (attempts > 20) clearInterval(interval);
-    }, 300);
-})();
-</script>
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────
