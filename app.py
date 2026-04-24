@@ -315,8 +315,89 @@ def get_historico(ticker, period, interval="1d"):
     s, _ = _get_historico_original(ticker, period, interval)
     return s
 
-@st.cache_data(ttl=300)
-def get_ohlcv(ticker, period="1y"):
+@st.cache_data(ttl=600)
+def get_precio_actual(ticker):
+    """Obtiene precio actual y datos básicos para mostrar en el buscador"""
+    try:
+        t = yf.Ticker(ticker)
+        info = t.info
+        precio = (info.get("currentPrice") or info.get("regularMarketPrice")
+                  or info.get("previousClose") or 0.0)
+        return {
+            "precio":    float(precio),
+            "nombre":    info.get("longName") or info.get("shortName", ticker),
+            "moneda":    info.get("currency", "USD"),
+            "exchange":  info.get("exchange") or info.get("fullExchangeName", ""),
+            "sector":    info.get("sector", "—"),
+            "industria": info.get("industry", "—"),
+        }
+    except:
+        return None
+
+@st.cache_data(ttl=600)
+def get_fundamentales(ticker):
+    """Extrae métricas fundamentales via yfinance"""
+    try:
+        t    = yf.Ticker(ticker)
+        info = t.info
+        def _f(k, dec=2):
+            v = info.get(k)
+            return round(float(v), dec) if v is not None else None
+        def _fmt_mkt(v):
+            if v is None: return "—"
+            if v >= 1e12: return f"${v/1e12:.2f}T"
+            if v >= 1e9:  return f"${v/1e9:.2f}B"
+            if v >= 1e6:  return f"${v/1e6:.2f}M"
+            return f"${v:,.0f}"
+        return {
+            # Valuación
+            "pe_ratio":       _f("trailingPE"),
+            "pe_forward":     _f("forwardPE"),
+            "pb_ratio":       _f("priceToBook"),
+            "ps_ratio":       _f("priceToSalesTrailing12Months"),
+            "peg":            _f("pegRatio"),
+            "ev_ebitda":      _f("enterpriseToEbitda"),
+            # Rentabilidad
+            "roe":            _f("returnOnEquity", 4),
+            "roa":            _f("returnOnAssets", 4),
+            "margen_bruto":   _f("grossMargins", 4),
+            "margen_neto":    _f("profitMargins", 4),
+            "margen_op":      _f("operatingMargins", 4),
+            # Por acción
+            "eps_ttm":        _f("trailingEps"),
+            "eps_fwd":        _f("forwardEps"),
+            "bvps":           _f("bookValue"),
+            "div_yield":      _f("dividendYield", 4),
+            "div_rate":       _f("dividendRate"),
+            "payout":         _f("payoutRatio", 4),
+            # Tamaño
+            "mkt_cap":        _fmt_mkt(info.get("marketCap")),
+            "enterprise_val": _fmt_mkt(info.get("enterpriseValue")),
+            "revenue":        _fmt_mkt(info.get("totalRevenue")),
+            "ebitda":         _fmt_mkt(info.get("ebitda")),
+            # Deuda
+            "debt_equity":    _f("debtToEquity"),
+            "current_ratio":  _f("currentRatio"),
+            "quick_ratio":    _f("quickRatio"),
+            # Crecimiento
+            "rev_growth":     _f("revenueGrowth", 4),
+            "earn_growth":    _f("earningsGrowth", 4),
+            # Info
+            "nombre":         info.get("longName", ticker),
+            "sector":         info.get("sector", "—"),
+            "industria":      info.get("industry", "—"),
+            "pais":           info.get("country", "—"),
+            "bolsa":          info.get("exchange", "—"),
+            "moneda":         info.get("currency", "USD"),
+            "descripcion":    info.get("longBusinessSummary", ""),
+            "precio":         float(info.get("currentPrice") or info.get("regularMarketPrice") or 0),
+            "52w_high":       _f("fiftyTwoWeekHigh"),
+            "52w_low":        _f("fiftyTwoWeekLow"),
+            "beta":           _f("beta"),
+            "empleados":      info.get("fullTimeEmployees"),
+        }
+    except:
+        return None
     try:
         df = yf.download(ticker, period=period, interval="1d", progress=False)
         if df.empty: return None
@@ -642,14 +723,15 @@ with st.sidebar:
         st.rerun()
 
     vistas = {
-        "📊  Dashboard":       "dashboard",
-        "👁️  Seguimiento":     "seguimiento",
-        "⚡  Comparación":     "comparacion",
-        "🔬  Análisis Técnico":"tecnico",
-        "🧬  Régimen HMM":     "hmm",
-        "📈  Backtesting":     "backtest",
-        "🔗  Pairs Trading":   "pairs",
-        "⚖️  Kelly Sizing":    "kelly",
+        "📊  Dashboard":        "dashboard",
+        "👁️  Seguimiento":      "seguimiento",
+        "⚡  Comparación":      "comparacion",
+        "🔬  Análisis Técnico": "tecnico",
+        "📋  Fundamental":      "fundamental",
+        "🧬  Régimen HMM":      "hmm",
+        "📈  Backtesting":      "backtest",
+        "🔗  Pairs Trading":    "pairs",
+        "⚖️  Kelly Sizing":     "kelly",
     }
     for label, key in vistas.items():
         active = st.session_state.vista == key
@@ -672,13 +754,41 @@ with st.sidebar:
                 for s in resultados
             }
             seleccion = st.selectbox("", list(opciones.keys()), label_visibility="collapsed")
+            ticker_final = opciones[seleccion]
+            partes  = seleccion.split("  ·  ")
+            mercado = partes[1].split("  —  ")[0].strip() if len(partes)>1 else "N/A"
+            nombre  = partes[1].split("  —  ")[1].strip() if len(partes)>1 and "  —  " in partes[1] else seleccion
 
-            # ── FIX 3: Costo base real con soporte de fracciones ──
-            st.markdown("""
-            <div style='font-size:10px;letter-spacing:2px;color:#444466;
-                        font-family:JetBrains Mono;margin:8px 0 4px'>
-            COSTO BASE
-            </div>""", unsafe_allow_html=True)
+            # ── Tarjeta con precio actual y datos clave ──
+            with st.spinner("Obteniendo precio…"):
+                info_vivo = get_precio_actual(ticker_final)
+
+            if info_vivo and info_vivo["precio"] > 0:
+                p_vivo   = info_vivo["precio"]
+                moneda   = info_vivo["moneda"]
+                sector   = info_vivo["sector"]
+                st.markdown(f"""
+                <div style='background:#0a0a20;border:1px solid #00ff9d44;border-radius:10px;
+                            padding:12px 14px;margin:8px 0'>
+                    <div style='font-size:11px;color:#444466;font-family:JetBrains Mono;
+                                letter-spacing:1px;margin-bottom:4px'>{ticker_final} · {info_vivo["exchange"]}</div>
+                    <div style='font-size:11px;color:#888;margin-bottom:6px'>{info_vivo["nombre"][:40]}</div>
+                    <div style='display:flex;justify-content:space-between;align-items:center'>
+                        <span style='font-family:JetBrains Mono;font-size:20px;
+                                     font-weight:700;color:#00ff9d'>{moneda} {p_vivo:,.4f}</span>
+                        <span style='font-size:11px;color:#556;font-family:JetBrains Mono'>{sector}</span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                precio_sugerido = p_vivo
+            else:
+                precio_sugerido = 0.0
+                st.caption("No se pudo obtener precio en tiempo real.")
+
+            # ── Costo base con precio sugerido pre-llenado ──
+            st.markdown("""<div style='font-size:10px;letter-spacing:2px;color:#444466;
+                        font-family:JetBrains Mono;margin:8px 0 4px'>COSTO BASE</div>""",
+                        unsafe_allow_html=True)
 
             col_a, col_b = st.columns(2)
             costo_total = col_a.number_input(
@@ -695,19 +805,26 @@ with st.sidebar:
                 help="Pueden ser fracciones (ej: 0.5, 1.25)"
             )
 
-            # Precio promedio calculado automáticamente
+            # Si tiene precio vivo y pone solo acciones, calcular costo automático
+            if cant > 0 and costo_total == 0 and precio_sugerido > 0:
+                costo_auto = cant * precio_sugerido
+                st.markdown(f"""
+                <div style='background:#3b82f611;border:1px solid #3b82f644;border-radius:8px;
+                            padding:8px 12px;margin:4px 0;font-family:JetBrains Mono;font-size:12px'>
+                    <span style='color:#3b82f6'>💡 Costo estimado al precio actual:</span>
+                    <span style='color:#e8e8f0;font-weight:700;margin-left:6px'>${costo_auto:,.2f}</span>
+                </div>""", unsafe_allow_html=True)
+
             if cant > 0 and costo_total > 0:
                 precio_promedio = costo_total / cant
                 st.markdown(f"""
                 <div style='background:#00ff9d0a;border:1px solid #00ff9d33;
                             border-radius:8px;padding:8px 12px;margin:6px 0;
                             font-family:JetBrains Mono;font-size:12px'>
-                    <span style='color:#444466'>Precio promedio:</span>
-                    <span style='color:#00ff9d;font-weight:700;margin-left:8px'>
-                        ${precio_promedio:.4f}
-                    </span>
-                </div>
-                """, unsafe_allow_html=True)
+                    <span style='color:#444466'>Precio promedio pagado:</span>
+                    <span style='color:#00ff9d;font-weight:700;margin-left:8px'>${precio_promedio:,.4f}</span>
+                    {"&nbsp;&nbsp;<span style='color:#f59e0b'>⚠️ pagaste más que el precio actual</span>" if precio_sugerido > 0 and precio_promedio > precio_sugerido else ""}
+                </div>""", unsafe_allow_html=True)
             else:
                 precio_promedio = costo_total / cant if cant > 0 else 0.0
 
@@ -716,11 +833,6 @@ with st.sidebar:
             ba, bb = st.columns(2)
             add_port  = ba.button("💼 Portafolio",  key="btn_add_port",  use_container_width=True)
             add_watch = bb.button("👁️ Seguimiento", key="btn_add_watch", use_container_width=True)
-
-            ticker_final = opciones[seleccion]
-            partes  = seleccion.split("  ·  ")
-            mercado = partes[1].split("  —  ")[0].strip() if len(partes)>1 else "N/A"
-            nombre  = partes[1].split("  —  ")[1].strip() if len(partes)>1 and "  —  " in partes[1] else seleccion
 
             if add_port:
                 if ticker_final in st.session_state.portfolio["Ticker"].values:
@@ -1517,3 +1629,205 @@ elif st.session_state.vista == "kelly":
         st.markdown("""<div style='background:#f59e0b0e;border:1px solid #f59e0b33;border-radius:10px;padding:14px 18px;margin-top:8px;font-size:13px;color:#f59e0b'>
             ⚠️ <strong>Kelly/2 es más robusto en la práctica.</strong> El Kelly completo asume distribuciones estables.
             Renaissance usa variantes fraccionarias ajustadas por correlación entre posiciones.</div>""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────
+#  ANÁLISIS FUNDAMENTAL
+# ─────────────────────────────────────────
+elif st.session_state.vista == "fundamental":
+    st.markdown("<div style='padding:28px 0 4px'><div class='label-tag'>ANÁLISIS FUNDAMENTAL</div>"
+                "<div style='font-size:28px;font-weight:800'>📋 Radiografía de la Empresa</div></div>",
+                unsafe_allow_html=True)
+
+    port = st.session_state.portfolio.reset_index(drop=True)
+    col1, col2 = st.columns([2, 2])
+    ticker_manual = col1.text_input("Ticker", placeholder="AAPL, GMEXICO.MX, TSLA…", key="fund_ticker")
+    ticker_port   = col2.selectbox("O desde portafolio", [""] + port["Ticker"].tolist(), key="fund_port")
+    ticker_f = ticker_manual.upper().strip() or ticker_port
+
+    if not ticker_f:
+        st.markdown("""<div style='background:#0e0e1e;border:1px solid #1c1c30;border-radius:14px;
+                    padding:48px;text-align:center'>
+            <div style='font-size:32px'>📋</div>
+            <div style='font-size:16px;font-weight:700;margin-top:12px'>Escribe un ticker para analizar</div>
+            <div style='color:#444466;font-size:13px;margin-top:6px'>Funciona con USA, México (.MX), Europa y más</div>
+        </div>""", unsafe_allow_html=True)
+    else:
+        with st.spinner(f"Obteniendo fundamentales de {ticker_f}…"):
+            fd = get_fundamentales(ticker_f)
+            if fd is None and "." not in ticker_f:
+                fd = get_fundamentales(ticker_f + ".MX")
+                if fd: ticker_f = ticker_f + ".MX"
+
+        if fd is None:
+            st.error(f"No se encontraron datos para {ticker_f}.")
+        else:
+            # ── Header empresa ──
+            precio_color = "#00ff9d" if fd["precio"] > 0 else "#888"
+            st.markdown(f"""
+            <div style='background:#0e0e1e;border:1px solid #1c1c30;border-radius:16px;
+                        padding:24px;margin:16px 0'>
+                <div style='font-size:11px;color:#444466;font-family:JetBrains Mono;
+                            letter-spacing:2px;margin-bottom:4px'>
+                    {ticker_f} · {fd["bolsa"]} · {fd["moneda"]}
+                </div>
+                <div style='font-size:22px;font-weight:800;margin-bottom:4px'>{fd["nombre"]}</div>
+                <div style='font-size:13px;color:#888;margin-bottom:12px'>
+                    {fd["sector"]} › {fd["industria"]} · {fd["pais"]}
+                </div>
+                <div style='display:flex;gap:32px;flex-wrap:wrap'>
+                    <div>
+                        <div style='font-size:10px;color:#444466;font-family:JetBrains Mono'>PRECIO ACTUAL</div>
+                        <div style='font-family:JetBrains Mono;font-size:26px;font-weight:700;
+                                    color:{precio_color}'>{fd["moneda"]} {fd["precio"]:,.2f}</div>
+                    </div>
+                    <div>
+                        <div style='font-size:10px;color:#444466;font-family:JetBrains Mono'>MKT CAP</div>
+                        <div style='font-family:JetBrains Mono;font-size:20px;font-weight:600;color:#e8e8f0'>{fd["mkt_cap"]}</div>
+                    </div>
+                    <div>
+                        <div style='font-size:10px;color:#444466;font-family:JetBrains Mono'>52W HIGH / LOW</div>
+                        <div style='font-family:JetBrains Mono;font-size:14px;color:#e8e8f0'>
+                            <span style='color:#00ff9d'>{fd["52w_high"] or "—"}</span>
+                            <span style='color:#444466'> / </span>
+                            <span style='color:#ff4466'>{fd["52w_low"] or "—"}</span>
+                        </div>
+                    </div>
+                    <div>
+                        <div style='font-size:10px;color:#444466;font-family:JetBrains Mono'>BETA</div>
+                        <div style='font-family:JetBrains Mono;font-size:18px;
+                                    color:{"#f59e0b" if fd["beta"] and abs(fd["beta"])>1.5 else "#e8e8f0"}'>{fd["beta"] or "—"}</div>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            def metrica_card(label, valor, sufijo="", color_fn=None, ayuda=""):
+                if valor is None: val_str, color = "—", "#666"
+                else:
+                    if sufijo == "%": val_str = f"{valor*100:.1f}%"
+                    elif sufijo == "x": val_str = f"{valor:.2f}x"
+                    else: val_str = f"{valor}"
+                    color = color_fn(valor) if color_fn else "#e8e8f0"
+                return f"""<div style='background:#0a0a16;border:1px solid #1c1c30;border-radius:10px;
+                                padding:12px 14px;'>
+                    <div style='font-size:9px;letter-spacing:2px;color:#444466;
+                                font-family:JetBrains Mono;text-transform:uppercase;margin-bottom:4px'>{label}</div>
+                    <div style='font-family:JetBrains Mono;font-size:18px;font-weight:700;color:{color}'>{val_str}</div>
+                    {"<div style='font-size:10px;color:#444;margin-top:2px'>"+ayuda+"</div>" if ayuda else ""}
+                </div>"""
+
+            # ── VALUACIÓN ──
+            st.markdown("<div class='label-tag' style='margin-top:8px'>VALUACIÓN</div>", unsafe_allow_html=True)
+            c1,c2,c3,c4,c5,c6 = st.columns(6)
+            for col, lbl, val, sfx, cfn, tip in [
+                (c1,"P/E Trailing",fd["pe_ratio"],"x",
+                 lambda v: "#00ff9d" if v<15 else "#f59e0b" if v<25 else "#ff4466","<15 barato"),
+                (c2,"P/E Forward",fd["pe_forward"],"x",
+                 lambda v: "#00ff9d" if v<15 else "#f59e0b" if v<25 else "#ff4466","expectativa"),
+                (c3,"P/B Ratio",fd["pb_ratio"],"x",
+                 lambda v: "#00ff9d" if v<1.5 else "#f59e0b" if v<3 else "#ff4466","<1 infravalorado"),
+                (c4,"P/S Ratio",fd["ps_ratio"],"x",
+                 lambda v: "#00ff9d" if v<2 else "#f59e0b" if v<5 else "#ff4466","ventas"),
+                (c5,"PEG",fd["peg"],"x",
+                 lambda v: "#00ff9d" if v<1 else "#f59e0b" if v<2 else "#ff4466","<1 buen precio"),
+                (c6,"EV/EBITDA",fd["ev_ebitda"],"x",
+                 lambda v: "#00ff9d" if v<10 else "#f59e0b" if v<20 else "#ff4466","<10 atractivo"),
+            ]:
+                col.markdown(metrica_card(lbl, val, sfx, cfn, tip), unsafe_allow_html=True)
+
+            # ── RENTABILIDAD ──
+            st.markdown("<div class='label-tag' style='margin-top:16px'>RENTABILIDAD</div>", unsafe_allow_html=True)
+            c1,c2,c3,c4 = st.columns(4)
+            for col, lbl, val, tip in [
+                (c1,"ROE",fd["roe"],"retorno sobre equity"),
+                (c2,"ROA",fd["roa"],"retorno sobre activos"),
+                (c3,"Margen Bruto",fd["margen_bruto"],"gross margin"),
+                (c4,"Margen Neto",fd["margen_neto"],"net margin"),
+            ]:
+                color_fn = lambda v: "#00ff9d" if v>0.15 else "#f59e0b" if v>0.05 else "#ff4466"
+                col.markdown(metrica_card(lbl, val, "%", color_fn, tip), unsafe_allow_html=True)
+
+            # ── POR ACCIÓN & DIVIDENDOS ──
+            st.markdown("<div class='label-tag' style='margin-top:16px'>POR ACCIÓN & DIVIDENDOS</div>", unsafe_allow_html=True)
+            c1,c2,c3,c4,c5 = st.columns(5)
+            c1.markdown(metrica_card("EPS TTM", fd["eps_ttm"], "",
+                lambda v: "#00ff9d" if v>0 else "#ff4466"), unsafe_allow_html=True)
+            c2.markdown(metrica_card("EPS Forward", fd["eps_fwd"], "",
+                lambda v: "#00ff9d" if v>0 else "#ff4466"), unsafe_allow_html=True)
+            c3.markdown(metrica_card("Book Value", fd["bvps"], ""), unsafe_allow_html=True)
+            c4.markdown(metrica_card("Div. Yield", fd["div_yield"], "%",
+                lambda v: "#00ff9d" if v>0.03 else "#f59e0b" if v>0 else "#666",
+                f"${fd['div_rate'] or 0:.2f}/acc"), unsafe_allow_html=True)
+            c5.markdown(metrica_card("Payout Ratio", fd["payout"], "%",
+                lambda v: "#00ff9d" if v<0.5 else "#f59e0b" if v<0.8 else "#ff4466"), unsafe_allow_html=True)
+
+            # ── SALUD FINANCIERA ──
+            st.markdown("<div class='label-tag' style='margin-top:16px'>SALUD FINANCIERA</div>", unsafe_allow_html=True)
+            c1,c2,c3,c4,c5 = st.columns(5)
+            c1.markdown(metrica_card("Deuda/Equity", fd["debt_equity"], "x",
+                lambda v: "#00ff9d" if v<50 else "#f59e0b" if v<150 else "#ff4466"), unsafe_allow_html=True)
+            c2.markdown(metrica_card("Current Ratio", fd["current_ratio"], "x",
+                lambda v: "#00ff9d" if v>2 else "#f59e0b" if v>1 else "#ff4466",
+                ">2 saludable"), unsafe_allow_html=True)
+            c3.markdown(metrica_card("Quick Ratio", fd["quick_ratio"], "x",
+                lambda v: "#00ff9d" if v>1 else "#ff4466"), unsafe_allow_html=True)
+            c4.markdown(metrica_card("Revenue", None, ""), unsafe_allow_html=True) if True else None
+            c4.markdown(f"""<div style='background:#0a0a16;border:1px solid #1c1c30;border-radius:10px;padding:12px 14px'>
+                <div style='font-size:9px;letter-spacing:2px;color:#444466;font-family:JetBrains Mono;text-transform:uppercase;margin-bottom:4px'>REVENUE</div>
+                <div style='font-family:JetBrains Mono;font-size:16px;font-weight:700;color:#e8e8f0'>{fd["revenue"]}</div>
+            </div>""", unsafe_allow_html=True)
+            c5.markdown(f"""<div style='background:#0a0a16;border:1px solid #1c1c30;border-radius:10px;padding:12px 14px'>
+                <div style='font-size:9px;letter-spacing:2px;color:#444466;font-family:JetBrains Mono;text-transform:uppercase;margin-bottom:4px'>EBITDA</div>
+                <div style='font-family:JetBrains Mono;font-size:16px;font-weight:700;color:#e8e8f0'>{fd["ebitda"]}</div>
+            </div>""", unsafe_allow_html=True)
+
+            # ── CRECIMIENTO ──
+            st.markdown("<div class='label-tag' style='margin-top:16px'>CRECIMIENTO</div>", unsafe_allow_html=True)
+            c1, c2, c3 = st.columns(3)
+            c1.markdown(metrica_card("Crec. Revenue", fd["rev_growth"], "%",
+                lambda v: "#00ff9d" if v>0.15 else "#f59e0b" if v>0 else "#ff4466"), unsafe_allow_html=True)
+            c2.markdown(metrica_card("Crec. Ganancias", fd["earn_growth"], "%",
+                lambda v: "#00ff9d" if v>0.15 else "#f59e0b" if v>0 else "#ff4466"), unsafe_allow_html=True)
+            c3.markdown(f"""<div style='background:#0a0a16;border:1px solid #1c1c30;border-radius:10px;padding:12px 14px'>
+                <div style='font-size:9px;letter-spacing:2px;color:#444466;font-family:JetBrains Mono;text-transform:uppercase;margin-bottom:4px'>EMPLEADOS</div>
+                <div style='font-family:JetBrains Mono;font-size:18px;font-weight:700;color:#e8e8f0'>
+                    {f"{fd['empleados']:,}" if fd["empleados"] else "—"}
+                </div>
+            </div>""", unsafe_allow_html=True)
+
+            # ── DESCRIPCIÓN ──
+            if fd["descripcion"]:
+                st.markdown("<div class='label-tag' style='margin-top:16px'>SOBRE LA EMPRESA</div>", unsafe_allow_html=True)
+                st.markdown(f"""<div style='background:#0a0a16;border:1px solid #1c1c30;border-radius:12px;
+                            padding:18px;font-size:13px;color:#aaa;line-height:1.7'>
+                    {fd["descripcion"][:600]}{"…" if len(fd["descripcion"])>600 else ""}
+                </div>""", unsafe_allow_html=True)
+
+            # ── SEMÁFORO GENERAL ──
+            scores = []
+            if fd["pe_ratio"]: scores.append(2 if fd["pe_ratio"]<15 else 1 if fd["pe_ratio"]<25 else 0)
+            if fd["roe"]: scores.append(2 if fd["roe"]>0.15 else 1 if fd["roe"]>0.05 else 0)
+            if fd["margen_neto"]: scores.append(2 if fd["margen_neto"]>0.15 else 1 if fd["margen_neto"]>0.05 else 0)
+            if fd["debt_equity"]: scores.append(2 if fd["debt_equity"]<50 else 1 if fd["debt_equity"]<150 else 0)
+            if fd["current_ratio"]: scores.append(2 if fd["current_ratio"]>2 else 1 if fd["current_ratio"]>1 else 0)
+            if fd["rev_growth"]: scores.append(2 if fd["rev_growth"]>0.15 else 1 if fd["rev_growth"]>0 else 0)
+
+            if scores:
+                prom = sum(scores)/len(scores)
+                if prom >= 1.5:
+                    semaforo_color, semaforo_txt = "#00ff9d", "🟢 FUNDAMENTALES SÓLIDOS"
+                elif prom >= 0.8:
+                    semaforo_color, semaforo_txt = "#f59e0b", "🟡 FUNDAMENTALES MIXTOS"
+                else:
+                    semaforo_color, semaforo_txt = "#ff4466", "🔴 FUNDAMENTALES DÉBILES"
+
+                st.markdown(f"""
+                <div style='background:{semaforo_color}11;border:2px solid {semaforo_color}44;
+                            border-radius:12px;padding:16px 20px;margin-top:16px;
+                            display:flex;align-items:center;justify-content:space-between'>
+                    <div style='font-size:18px;font-weight:800;color:{semaforo_color}'>{semaforo_txt}</div>
+                    <div style='font-family:JetBrains Mono;font-size:13px;color:#666'>
+                        Score: {prom:.1f}/2.0 ({len(scores)} métricas)
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
