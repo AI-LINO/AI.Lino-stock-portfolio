@@ -5,8 +5,66 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from itertools import combinations
-import os, warnings, hashlib, json
+import os, warnings, hashlib, json, base64, io
 warnings.filterwarnings("ignore")
+
+# ── Audio TTS via Web Speech API (sin dependencias extra) ──
+def audio_tts_html(texto, autoplay=False):
+    """Genera un widget HTML con Web Speech API para leer el texto en voz alta"""
+    # Limpiar texto para JS
+    texto_js = texto.replace("'", "\\'").replace("\n", " ").replace('"', '\\"')
+    auto = "true" if autoplay else "false"
+    return f"""
+    <div style='background:#0e0e1e;border:1px solid #1c1c30;border-radius:10px;
+                padding:10px 14px;display:flex;align-items:center;gap:10px;margin:8px 0'>
+        <button id='tts_play' onclick='ttsToggle()'
+            style='background:linear-gradient(135deg,#00ff9d22,#00ff9d44);
+                   border:1px solid #00ff9d55;border-radius:8px;
+                   color:#00ff9d;font-family:JetBrains Mono,monospace;
+                   font-size:13px;font-weight:700;padding:6px 14px;cursor:pointer'>
+            🔊 Escuchar análisis
+        </button>
+        <span id='tts_status' style='font-family:JetBrains Mono;font-size:11px;color:#444466'></span>
+    </div>
+    <script>
+    var _tts_utt = null;
+    var _tts_playing = false;
+    function ttsToggle() {{
+        if (_tts_playing) {{
+            window.speechSynthesis.cancel();
+            _tts_playing = false;
+            document.getElementById('tts_play').textContent = '🔊 Escuchar análisis';
+            document.getElementById('tts_status').textContent = '';
+            return;
+        }}
+        window.speechSynthesis.cancel();
+        _tts_utt = new SpeechSynthesisUtterance('{texto_js}');
+        _tts_utt.lang = 'es-MX';
+        _tts_utt.rate = 0.95;
+        _tts_utt.pitch = 1.0;
+        // Elegir voz en español si está disponible
+        var voices = window.speechSynthesis.getVoices();
+        var esVoice = voices.find(v => v.lang.startsWith('es'));
+        if (esVoice) _tts_utt.voice = esVoice;
+        _tts_utt.onstart  = function() {{
+            _tts_playing = true;
+            document.getElementById('tts_play').textContent = '⏹ Detener';
+            document.getElementById('tts_status').textContent = '▶ reproduciendo…';
+        }};
+        _tts_utt.onend = function() {{
+            _tts_playing = false;
+            document.getElementById('tts_play').textContent = '🔊 Escuchar análisis';
+            document.getElementById('tts_status').textContent = '✓ listo';
+        }};
+        window.speechSynthesis.speak(_tts_utt);
+        {"window.speechSynthesis.speak(_tts_utt);" if autoplay else ""}
+    }}
+    // Cargar voces (Chrome las carga async)
+    if (window.speechSynthesis.onvoiceschanged !== undefined) {{
+        window.speechSynthesis.onvoiceschanged = function() {{}};
+    }}
+    </script>
+    """
 
 # ─────────────────────────────────────────
 #  MULTI-USUARIO — cada usuario tiene su
@@ -278,11 +336,10 @@ def motor_avanzado(ticker):
         return None
 
 @st.cache_data(ttl=300)
-def get_historico(ticker, period, interval="1d"):
+def _get_historico_raw(ticker, period, interval="1d"):
     """Descarga histórico con auto-retry de sufijos de mercado"""
-    # Sufijos a intentar en orden si el ticker falla
     sufijos = ["", ".MX", ".BA", ".SA", ".L", ".PA", ".DE", ".MC", ".MI"]
-    base = ticker.upper().strip().split(".")[0]  # quitar sufijo si ya tiene
+    base = ticker.upper().strip().split(".")[0]
 
     for sfx in sufijos:
         t = base + sfx
@@ -299,21 +356,38 @@ def get_historico(ticker, period, interval="1d"):
             s = s.dropna()
             if len(s) < 2: continue
             s.index = pd.to_datetime(s.index)
-            return s, t   # devuelve también el ticker que funcionó
+            return s, t
         except:
             continue
-    return None, ticker   # falló todo
+    return None, ticker
 
 def resolver_ticker(ticker, period="1y"):
-    """Wrapper que devuelve solo la serie para compatibilidad"""
-    s, _ = get_historico(ticker, period)
+    s, _ = _get_historico_raw(ticker, period)
     return s
 
-# Sobrescribir get_historico para compatibilidad con el resto del código
-_get_historico_original = get_historico
 def get_historico(ticker, period, interval="1d"):
-    s, _ = _get_historico_original(ticker, period, interval)
+    s, _ = _get_historico_raw(ticker, period, interval)
     return s
+
+@st.cache_data(ttl=300)
+def get_ohlcv(ticker, period="1y"):
+    """Descarga OHLCV completo con auto-retry de sufijos"""
+    sufijos = ["", ".MX", ".BA", ".SA", ".L", ".PA", ".DE", ".MC", ".MI"]
+    base = ticker.upper().strip().split(".")[0]
+    for sfx in sufijos:
+        t = base + sfx
+        try:
+            df = yf.download(t, period=period, interval="1d", progress=False)
+            if df.empty: continue
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.droplevel(1)
+            df = df.dropna()
+            df.index = pd.to_datetime(df.index)
+            if len(df) < 2: continue
+            return df
+        except:
+            continue
+    return None
 
 @st.cache_data(ttl=600)
 def get_precio_actual(ticker):
@@ -1331,6 +1405,18 @@ elif st.session_state.vista == "tecnico":
                 <div style='font-family:JetBrains Mono;font-size:13px;color:#888;margin-top:8px'>
                     RSI: {rsi_now:.1f} &nbsp;|&nbsp; MACD Hist: {hist_now:.4f} &nbsp;|&nbsp; Score: {score:+d}/3
                 </div></div>""", unsafe_allow_html=True)
+
+            # ── Audio TTS del análisis técnico ──
+            texto_audio = (
+                f"Análisis técnico de {ticker}. "
+                f"{label_score}. "
+                f"RSI actual: {rsi_now:.0f}. "
+                f"{'El RSI está sobrecomprado, considera salir.' if rsi_now > 70 else 'El RSI está sobrevendido, posible oportunidad de compra.' if rsi_now < 30 else 'El RSI está en zona neutral.'} "
+                f"MACD histograma: {'positivo, momentum alcista.' if hist_now > 0 else 'negativo, momentum bajista.'} "
+                f"Score combinado: {score} de 3. "
+                f"{'Señal fuerte de compra.' if score >= 2 else 'Señal fuerte de venta.' if score <= -2 else 'Sin señal clara, esperar confirmación.'}"
+            )
+            st.components.v1.html(audio_tts_html(texto_audio), height=60)
             fig=make_subplots(rows=3,cols=1,shared_xaxes=True,row_heights=[0.55,0.25,0.20],
                               vertical_spacing=0.04,subplot_titles=[f"{ticker} — Precio & Bollinger","MACD","RSI"])
             fig.add_trace(go.Scatter(x=close.index,y=bb_up,name="BB Superior",line=dict(color="#3b82f6",width=1,dash="dot"),showlegend=False),row=1,col=1)
@@ -1831,3 +1917,20 @@ elif st.session_state.vista == "fundamental":
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
+
+                # ── Audio TTS del análisis fundamental ──
+                pe_txt = f"P E de {fd['pe_ratio']:.1f}, " if fd["pe_ratio"] else ""
+                roe_txt = f"ROE de {fd['roe']*100:.1f} por ciento, " if fd["roe"] else ""
+                div_txt = f"dividendo de {fd['div_yield']*100:.1f} por ciento, " if fd["div_yield"] else ""
+                crec_txt = f"crecimiento de ingresos de {fd['rev_growth']*100:.1f} por ciento, " if fd["rev_growth"] else ""
+                beta_txt = f"beta de {fd['beta']:.2f}, lo que indica {'alta volatilidad' if fd['beta'] and fd['beta']>1.5 else 'volatilidad moderada' if fd['beta'] and fd['beta']>1 else 'baja volatilidad'}, " if fd["beta"] else ""
+                texto_fund = (
+                    f"Análisis fundamental de {fd['nombre']}. "
+                    f"Sector: {fd['sector']}. "
+                    f"Capitalización de mercado: {fd['mkt_cap']}. "
+                    f"Precio actual: {fd['moneda']} {fd['precio']:.2f}. "
+                    f"{pe_txt}{roe_txt}{div_txt}{crec_txt}{beta_txt}"
+                    f"Evaluación general: {semaforo_txt.split(' ', 1)[1]}. "
+                    f"Score fundamental: {prom:.1f} sobre 2 puntos."
+                )
+                st.components.v1.html(audio_tts_html(texto_fund), height=60)
