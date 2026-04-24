@@ -279,21 +279,41 @@ def motor_avanzado(ticker):
 
 @st.cache_data(ttl=300)
 def get_historico(ticker, period, interval="1d"):
-    try:
-        df = yf.download(ticker, period=period, interval=interval, progress=False)
-        if df.empty: return None
-        raw = df["Close"]
-        if isinstance(raw, pd.DataFrame):
-            s = raw.iloc[:, 0]
-        elif isinstance(raw, pd.Series):
-            s = raw
-        else:
-            return None
-        s = s.dropna()
-        s.index = pd.to_datetime(s.index)
-        return s
-    except:
-        return None
+    """Descarga histórico con auto-retry de sufijos de mercado"""
+    # Sufijos a intentar en orden si el ticker falla
+    sufijos = ["", ".MX", ".BA", ".SA", ".L", ".PA", ".DE", ".MC", ".MI"]
+    base = ticker.upper().strip().split(".")[0]  # quitar sufijo si ya tiene
+
+    for sfx in sufijos:
+        t = base + sfx
+        try:
+            df = yf.download(t, period=period, interval=interval, progress=False)
+            if df.empty: continue
+            raw = df["Close"]
+            if isinstance(raw, pd.DataFrame):
+                s = raw.iloc[:, 0]
+            elif isinstance(raw, pd.Series):
+                s = raw
+            else:
+                continue
+            s = s.dropna()
+            if len(s) < 2: continue
+            s.index = pd.to_datetime(s.index)
+            return s, t   # devuelve también el ticker que funcionó
+        except:
+            continue
+    return None, ticker   # falló todo
+
+def resolver_ticker(ticker, period="1y"):
+    """Wrapper que devuelve solo la serie para compatibilidad"""
+    s, _ = get_historico(ticker, period)
+    return s
+
+# Sobrescribir get_historico para compatibilidad con el resto del código
+_get_historico_original = get_historico
+def get_historico(ticker, period, interval="1d"):
+    s, _ = _get_historico_original(ticker, period, interval)
+    return s
 
 @st.cache_data(ttl=300)
 def get_ohlcv(ticker, period="1y"):
@@ -1228,21 +1248,60 @@ elif st.session_state.vista == "hmm":
                 "<span style='color:#f59e0b'>lateral</span> usando retornos logarítmicos.</div>",unsafe_allow_html=True)
     port=st.session_state.portfolio.reset_index(drop=True)
     col1,col2=st.columns([2,2])
-    ticker_manual=col1.text_input("Ticker",placeholder="SPY, QQQ, AAPL…")
+    ticker_manual=col1.text_input("Ticker",placeholder="AAPL, GMEXICO.MX, PE&OLES.MX…")
     ticker_port=col2.selectbox("O desde portafolio",[""]+port["Ticker"].tolist())
     ticker_hmm=ticker_manual.upper().strip() or ticker_port
     periodo_hmm=st.select_slider("Periodo análisis",options=["6mo","1y","2y","5y"],value="2y")
+
+    # ── Guía de tickers por mercado ──
+    with st.expander("📖 ¿Cómo escribir tickers de México, Europa y otros mercados?"):
+        st.markdown("""
+        <div style='font-family:JetBrains Mono;font-size:12px;line-height:2'>
+        <b style='color:#00ff9d'>🇺🇸 USA</b> — sin sufijo: <code>AAPL</code>, <code>TSLA</code>, <code>SPY</code><br>
+        <b style='color:#f59e0b'>🇲🇽 México (BMV)</b> — sufijo <code>.MX</code>: <code>GMEXICO.MX</code>, <code>FEMSAUBD.MX</code>, <code>PE&OLES.MX</code>, <code>WALMEX.MX</code><br>
+        <b style='color:#3b82f6'>🇬🇧 Londres</b> — sufijo <code>.L</code>: <code>HSBA.L</code>, <code>BP.L</code><br>
+        <b style='color:#ec4899'>🇪🇺 París</b> — sufijo <code>.PA</code>: <code>MC.PA</code> (LVMH), <code>AIR.PA</code> (Airbus)<br>
+        <b style='color:#8b5cf6'>🇩🇪 Frankfurt</b> — sufijo <code>.DE</code>: <code>SAP.DE</code>, <code>BMW.DE</code><br>
+        <b style='color:#06b6d4'>🇪🇸 Madrid</b> — sufijo <code>.MC</code>: <code>SAN.MC</code> (Santander)<br>
+        <b style='color:#10b981'>🇧🇷 Brasil</b> — sufijo <code>.SA</code>: <code>PETR4.SA</code> (Petrobras)<br>
+        <b style='color:#eab308'>🇦🇷 Argentina</b> — sufijo <code>.BA</code>: <code>GGAL.BA</code><br>
+        </div>
+        <div style='margin-top:8px;font-size:11px;color:#666'>
+        💡 Si no sabes el ticker exacto, búscalo primero en el panel izquierdo — el buscador lo encuentra automáticamente.
+        </div>
+        """, unsafe_allow_html=True)
+
     if ticker_hmm:
-        with st.spinner("Corriendo HMM Baum-Welch…"): serie=get_historico(ticker_hmm,periodo_hmm)
-        if serie is None: st.error("No se pudo obtener datos.")
+        with st.spinner("Corriendo HMM Baum-Welch…"):
+            serie = get_historico(ticker_hmm, periodo_hmm)
+            # Intentar con sufijo .MX si falla y no tiene sufijo
+            ticker_usado = ticker_hmm
+            if serie is None and "." not in ticker_hmm:
+                serie = get_historico(ticker_hmm + ".MX", periodo_hmm)
+                if serie is not None:
+                    ticker_usado = ticker_hmm + ".MX"
+
+        if serie is None:
+            st.error(f"No se pudo obtener datos para **{ticker_hmm}**.")
+            st.markdown(f"""
+            <div style='background:#f59e0b11;border:1px solid #f59e0b44;border-radius:10px;
+                        padding:14px 16px;margin-top:8px;font-size:13px'>
+                <b style='color:#f59e0b'>💡 Sugerencias:</b><br>
+                • Si es empresa <b>mexicana</b>, agrega <code>.MX</code> → <code>{ticker_hmm}.MX</code><br>
+                • Si es empresa <b>europea</b>, agrega el sufijo de su bolsa (ver guía arriba)<br>
+                • Usa el <b>buscador del panel izquierdo</b> para encontrar el ticker correcto
+            </div>
+            """, unsafe_allow_html=True)
         else:
+            if ticker_usado != ticker_hmm:
+                st.info(f"💡 Ticker ajustado automáticamente: **{ticker_hmm}** → **{ticker_usado}**")
             estados,fechas=hmm_regimen(serie)
             if estados is None: st.warning("Datos insuficientes para HMM.")
             else:
                 estado_actual=estados[-1]; n_bull=(estados==2).sum(); n_lat=(estados==1).sum(); n_bear=(estados==0).sum(); total=len(estados)
                 clase=clase_regimen(estado_actual)
                 st.markdown(f"""<div class='{clase}' style='margin:16px 0'>
-                    <div style='font-size:11px;letter-spacing:2px;font-family:JetBrains Mono;opacity:0.7'>RÉGIMEN ACTUAL — {ticker_hmm}</div>
+                    <div style='font-size:11px;letter-spacing:2px;font-family:JetBrains Mono;opacity:0.7'>RÉGIMEN ACTUAL — {ticker_usado}</div>
                     <div style='font-size:26px;margin-top:4px'>{nombre_regimen(estado_actual)}</div>
                 </div>""", unsafe_allow_html=True)
                 c1,c2,c3=st.columns(3)
