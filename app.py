@@ -11,7 +11,8 @@ warnings.filterwarnings("ignore")
 # ─────────────────────────────────────────
 #  PERSISTENCIA
 # ─────────────────────────────────────────
-FILE_PATH = "portfolio_data.csv"
+FILE_PATH      = "portfolio_data.csv"
+WATCHLIST_PATH = "watchlist_data.csv"
 
 def guardar_datos(df):
     df.to_csv(FILE_PATH, index=False)
@@ -21,8 +22,18 @@ def cargar_datos():
         return pd.read_csv(FILE_PATH)
     return pd.DataFrame(columns=["Ticker","Nombre","Compra","Cantidad","Mercado"])
 
+def guardar_watchlist(df):
+    df.to_csv(WATCHLIST_PATH, index=False)
+
+def cargar_watchlist():
+    if os.path.exists(WATCHLIST_PATH):
+        return pd.read_csv(WATCHLIST_PATH)
+    return pd.DataFrame(columns=["Ticker","Nombre","Mercado"])
+
 if "portfolio" not in st.session_state:
     st.session_state.portfolio = cargar_datos()
+if "watchlist" not in st.session_state:
+    st.session_state.watchlist = cargar_watchlist()
 if "vista" not in st.session_state:
     st.session_state.vista = "dashboard"
 
@@ -408,6 +419,7 @@ with st.sidebar:
 
     vistas = {
         "📊  Dashboard":       "dashboard",
+        "👁️  Seguimiento":     "seguimiento",
         "⚡  Comparación":     "comparacion",
         "🔬  Análisis Técnico":"tecnico",
         "🧬  Régimen HMM":     "hmm",
@@ -439,18 +451,36 @@ with st.sidebar:
             col_a, col_b = st.columns(2)
             p_compra = col_a.number_input("Precio", min_value=0.0, key="p_compra")
             cant     = col_b.number_input("Cantidad", min_value=0.0, key="cant")
-            if st.button("＋ Agregar", use_container_width=True):
-                ticker_final = opciones[seleccion]
+
+            # ── Dos botones: portafolio o seguimiento ──
+            st.markdown("<div style='font-size:10px;letter-spacing:2px;color:#444466;font-family:JetBrains Mono;margin-top:8px'>¿DÓNDE AGREGAR?</div>", unsafe_allow_html=True)
+            ba, bb = st.columns(2)
+            add_port  = ba.button("💼 Portafolio",  key="btn_add_port",  use_container_width=True)
+            add_watch = bb.button("👁️ Seguimiento", key="btn_add_watch", use_container_width=True)
+
+            ticker_final = opciones[seleccion]
+            partes  = seleccion.split("  ·  ")
+            mercado = partes[1].split("  —  ")[0].strip() if len(partes)>1 else "N/A"
+            nombre  = partes[1].split("  —  ")[1].strip() if len(partes)>1 and "  —  " in partes[1] else seleccion
+
+            if add_port:
                 if ticker_final in st.session_state.portfolio["Ticker"].values:
-                    st.warning(f"{ticker_final} ya existe.")
+                    st.warning(f"{ticker_final} ya está en el portafolio.")
                 else:
-                    partes  = seleccion.split("  ·  ")
-                    mercado = partes[1].split("  —  ")[0].strip() if len(partes)>1 else "N/A"
-                    nombre  = partes[1].split("  —  ")[1].strip() if len(partes)>1 and "  —  " in partes[1] else seleccion
-                    nuevo   = pd.DataFrame([{"Ticker":ticker_final,"Nombre":nombre,"Compra":p_compra,"Cantidad":cant,"Mercado":mercado}])
+                    nuevo = pd.DataFrame([{"Ticker":ticker_final,"Nombre":nombre,"Compra":p_compra,"Cantidad":cant,"Mercado":mercado}])
                     st.session_state.portfolio = pd.concat([st.session_state.portfolio,nuevo],ignore_index=True)
                     guardar_datos(st.session_state.portfolio)
-                    st.success(f"✅ {ticker_final} agregado")
+                    st.success(f"✅ {ticker_final} → Portafolio")
+                    st.rerun()
+
+            if add_watch:
+                if ticker_final in st.session_state.watchlist["Ticker"].values:
+                    st.warning(f"{ticker_final} ya está en Seguimiento.")
+                else:
+                    nuevo = pd.DataFrame([{"Ticker":ticker_final,"Nombre":nombre,"Mercado":mercado}])
+                    st.session_state.watchlist = pd.concat([st.session_state.watchlist,nuevo],ignore_index=True)
+                    guardar_watchlist(st.session_state.watchlist)
+                    st.success(f"👁️ {ticker_final} → Seguimiento")
                     st.rerun()
         else:
             st.caption("Sin resultados.")
@@ -614,22 +644,199 @@ if st.session_state.vista == "dashboard":
                           bargap=0.35,xaxis=dict(showgrid=False,color="#444466"),
                           yaxis=dict(gridcolor="#1c1c30",color="#444466",zeroline=True,zerolinecolor="#2a2a44"))
         st.plotly_chart(fig, use_container_width=True)
-        st.markdown("<div class='label-tag'>Gestión de posiciones</div>", unsafe_allow_html=True)
-        for _,r in df_res.iterrows():
-            c1,c2,c3,c4,c5=st.columns([1.5,2,1.5,2.5,0.8])
-            c1.markdown(f"<div style='font-weight:700;font-size:15px'>{r['Ticker']}</div>"
-                        f"<div style='font-size:11px;color:#444466;font-family:JetBrains Mono'>{r['Mercado']}</div>",unsafe_allow_html=True)
-            c2.markdown(f"<div style='font-size:12px;color:#888;margin-top:4px'>{str(r['Nombre'])[:28]}</div>",unsafe_allow_html=True)
-            badge="badge-up" if r["Rendimiento"]>0 else "badge-down" if r["Rendimiento"]<0 else "badge-neu"
-            s2="▲" if r["Rendimiento"]>0 else "▼" if r["Rendimiento"]<0 else "—"
-            c3.markdown(f"<div class='{badge}' style='margin-top:6px'>{s2} {abs(r['Rendimiento']):.2f}%</div>",unsafe_allow_html=True)
-            c4.markdown(f"<div style='font-family:JetBrains Mono;font-size:13px;margin-top:4px'>${r['Valor Actual']:,.2f}</div>",unsafe_allow_html=True)
-            etiqueta=("🚨 Techo" if r["Acción"]=="VENDER (Techo)" else "⚠️ Sin datos" if r["Acción"]=="SIN DATOS" else "💎 MANTENER")
-            c4.markdown(f"<span style='font-size:11px'>{etiqueta}</span>",unsafe_allow_html=True)
-            if c5.button("✕",key=f"dash_del_{r['Ticker']}"):
-                st.session_state.portfolio=(st.session_state.portfolio.reset_index(drop=True).drop(index=int(r["idx"])).reset_index(drop=True))
-                guardar_datos(st.session_state.portfolio); st.rerun()
-            st.markdown("<div class='divider'></div>",unsafe_allow_html=True)
+
+        # ── Cards visuales por estado ──
+        st.markdown("<div class='label-tag' style='margin-top:8px'>Posiciones</div>", unsafe_allow_html=True)
+
+        # Agrupar por estado
+        grupos = {
+            "🚨 Alerta Venta":  df_res[df_res["Acción"]=="VENDER (Techo)"],
+            "💎 Mantener":      df_res[df_res["Acción"]=="MANTENER"],
+            "⚠️ Sin Datos":     df_res[df_res["Acción"]=="SIN DATOS"],
+        }
+        colores_grupo = {
+            "🚨 Alerta Venta": ("#ff0044","#ff004422","#ff004466"),
+            "💎 Mantener":     ("#00ff9d","#00ff9d11","#00ff9d44"),
+            "⚠️ Sin Datos":    ("#888","#88888811","#88888844"),
+        }
+
+        for grupo_label, grupo_df in grupos.items():
+            if grupo_df.empty: continue
+            color_txt, color_bg, color_bdr = colores_grupo[grupo_label]
+            st.markdown(f"""
+            <div style='font-size:11px;letter-spacing:2px;color:{color_txt};
+                        font-family:JetBrains Mono;text-transform:uppercase;
+                        margin:16px 0 8px;font-weight:700'>{grupo_label}</div>
+            """, unsafe_allow_html=True)
+
+            # Grid de 3 columnas
+            cols = st.columns(3)
+            for ci, (_, r) in enumerate(grupo_df.iterrows()):
+                rend = r["Rendimiento"]
+                rend_color = "#00ff9d" if rend>0 else "#ff4466" if rend<0 else "#888"
+                signo_r = "▲" if rend>0 else "▼" if rend<0 else "—"
+                with cols[ci % 3]:
+                    st.markdown(f"""
+                    <div style='background:{color_bg};border:1px solid {color_bdr};
+                                border-radius:12px;padding:14px 12px;margin-bottom:10px;
+                                text-align:center'>
+                        <div style='font-weight:800;font-size:16px;letter-spacing:0.5px'>{r['Ticker']}</div>
+                        <div style='font-size:10px;color:#556;font-family:JetBrains Mono;margin:2px 0 8px'>{r['Mercado']}</div>
+                        <div style='font-family:JetBrains Mono;font-size:18px;font-weight:700;color:{rend_color}'>
+                            {signo_r} {abs(rend):.1f}%
+                        </div>
+                        <div style='font-size:11px;color:#666;margin-top:4px;font-family:JetBrains Mono'>
+                            ${r['Valor Actual']:,.0f}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    if st.button("✕", key=f"card_del_{r['Ticker']}", use_container_width=True):
+                        st.session_state.portfolio=(
+                            st.session_state.portfolio.reset_index(drop=True)
+                            .drop(index=int(r["idx"])).reset_index(drop=True)
+                        )
+                        guardar_datos(st.session_state.portfolio); st.rerun()
+
+elif st.session_state.vista == "seguimiento":
+    st.markdown("<div style='padding:28px 0 4px'><div class='label-tag'>RADAR DE MERCADO</div>"
+                "<div style='font-size:28px;font-weight:800'>👁️ Seguimiento</div></div>",
+                unsafe_allow_html=True)
+    st.markdown("<div style='color:#666;font-size:14px;margin-bottom:20px'>"
+                "Acciones en radar — sin posición abierta. Mismo motor cuantitativo que el portafolio.</div>",
+                unsafe_allow_html=True)
+
+    watch = st.session_state.watchlist.reset_index(drop=True)
+
+    if watch.empty:
+        st.markdown("""<div style='background:#0e0e1e;border:1px solid #1c1c30;border-radius:16px;
+                    padding:60px;text-align:center;margin-top:20px'>
+            <div style='font-size:40px'>👁️</div>
+            <div style='font-size:18px;font-weight:700;margin-top:12px'>Sin acciones en seguimiento</div>
+            <div style='color:#444466;font-size:14px;margin-top:8px'>
+                Al agregar una acción en el sidebar, elige "Seguimiento"
+            </div>
+        </div>""", unsafe_allow_html=True)
+    else:
+        # ── Procesar datos de cada acción en watchlist ──
+        watch_data = []
+        for i in range(len(watch)):
+            row   = watch.iloc[i]
+            stats = motor_avanzado(row["Ticker"])
+            serie = get_historico(row["Ticker"], "1mo")
+            if stats:
+                trend, actual = stats
+                techo  = actual > trend * 1.05
+                # RSI rápido
+                if serie is not None and len(serie) > 14:
+                    rsi_s  = calcular_rsi(serie.astype(float))
+                    rsi_now= float(rsi_s.iloc[-1]) if not np.isnan(rsi_s.iloc[-1]) else 50
+                else:
+                    rsi_now = 50
+                # Variación 1 mes
+                if serie is not None and len(serie) > 1:
+                    var_mes = (float(serie.iloc[-1]) / float(serie.iloc[0]) - 1) * 100
+                else:
+                    var_mes = 0.0
+            else:
+                actual = techo = None
+                rsi_now = 50
+                var_mes = 0.0
+
+            watch_data.append({
+                "idx": i, "Ticker": row["Ticker"], "Nombre": row["Nombre"],
+                "Mercado": row["Mercado"], "Precio": actual,
+                "Var1m": round(var_mes, 2), "RSI": round(rsi_now, 1),
+                "Techo": techo,
+            })
+
+        # ── Grid de cards ──
+        cols = st.columns(3)
+        for ci, d in enumerate(watch_data):
+            precio_str = f"${d['Precio']:,.2f}" if d["Precio"] else "—"
+            var_color  = "#00ff9d" if d["Var1m"] >= 0 else "#ff4466"
+            var_str    = f"{'▲' if d['Var1m']>=0 else '▼'} {abs(d['Var1m']):.1f}%"
+
+            # Color del borde según señal
+            if d["Techo"]:
+                bdr_color = "#ff0044"; bg_color = "#ff004418"; estado_str = "🚨 TECHO"
+            elif d["RSI"] < 35:
+                bdr_color = "#00ff9d"; bg_color = "#00ff9d11"; estado_str = "🟢 COMPRA"
+            elif d["RSI"] > 65:
+                bdr_color = "#f59e0b"; bg_color = "#f59e0b11"; estado_str = "🟡 SOBRECOMPRA"
+            else:
+                bdr_color = "#2a2a44"; bg_color = "#0e0e1e";   estado_str = "⚪ NEUTRAL"
+
+            # RSI bar fill
+            rsi_pct = int(d["RSI"])
+            rsi_color = "#00ff9d" if d["RSI"]<35 else "#ff4466" if d["RSI"]>65 else "#f59e0b"
+
+            with cols[ci % 3]:
+                st.markdown(f"""
+                <div style='background:{bg_color};border:1px solid {bdr_color};
+                            border-radius:14px;padding:16px 14px;margin-bottom:12px'>
+                    <div style='display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px'>
+                        <div>
+                            <div style='font-weight:800;font-size:17px'>{d['Ticker']}</div>
+                            <div style='font-size:10px;color:#556;font-family:JetBrains Mono;letter-spacing:1px'>{d['Mercado']}</div>
+                        </div>
+                        <div style='font-size:11px;font-weight:700;color:{bdr_color};
+                                    font-family:JetBrains Mono;text-align:right'>{estado_str}</div>
+                    </div>
+                    <div style='font-family:JetBrains Mono;font-size:20px;font-weight:700;
+                                color:#e8e8f0;margin-bottom:6px'>{precio_str}</div>
+                    <div style='display:flex;justify-content:space-between;margin-bottom:10px'>
+                        <span style='font-family:JetBrains Mono;font-size:12px;color:{var_color}'>{var_str} 1m</span>
+                        <span style='font-family:JetBrains Mono;font-size:12px;color:{rsi_color}'>RSI {d['RSI']}</span>
+                    </div>
+                    <div style='background:#ffffff11;border-radius:4px;height:4px;overflow:hidden'>
+                        <div style='width:{rsi_pct}%;height:100%;background:{rsi_color};border-radius:4px'></div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                if st.button("✕ Quitar", key=f"watch_del_{d['Ticker']}", use_container_width=True):
+                    st.session_state.watchlist = (
+                        st.session_state.watchlist.reset_index(drop=True)
+                        .drop(index=d["idx"]).reset_index(drop=True)
+                    )
+                    guardar_watchlist(st.session_state.watchlist)
+                    st.rerun()
+
+        # ── Tabla resumen ──
+        st.markdown("<div class='label-tag' style='margin-top:16px'>Resumen</div>", unsafe_allow_html=True)
+        for d in watch_data:
+            precio_str = f"${d['Precio']:,.2f}" if d["Precio"] else "—"
+            var_color  = "#00ff9d" if d["Var1m"] >= 0 else "#ff4466"
+            rsi_color  = "#00ff9d" if d["RSI"]<35 else "#ff4466" if d["RSI"]>65 else "#f59e0b"
+            if d["Techo"]:
+                señal_str = "🚨 TECHO — Considerar entrada corta"
+                señal_col = "#ff0044"
+            elif d["RSI"] < 35:
+                señal_str = "🟢 RSI bajo — Posible oportunidad de compra"
+                señal_col = "#00ff9d"
+            elif d["RSI"] > 65:
+                señal_str = "🟡 RSI alto — Esperar corrección"
+                señal_col = "#f59e0b"
+            else:
+                señal_str = "⚪ Sin señal clara — Seguir monitoreando"
+                señal_col = "#666"
+
+            st.markdown(f"""
+            <div style='background:#0a0a16;border:1px solid #1c1c30;border-radius:10px;
+                        padding:12px 16px;margin-bottom:6px;
+                        display:flex;align-items:center;justify-content:space-between'>
+                <div>
+                    <span style='font-weight:700;font-size:15px'>{d['Ticker']}</span>
+                    <span style='font-size:11px;color:#556;font-family:JetBrains Mono;margin-left:10px'>{d['Nombre'][:25]}</span>
+                </div>
+                <div style='text-align:center'>
+                    <span style='font-family:JetBrains Mono;font-size:14px;color:#e8e8f0'>{precio_str}</span>
+                </div>
+                <div style='text-align:right'>
+                    <div style='font-size:12px;color:{señal_col};font-weight:600'>{señal_str}</div>
+                    <div style='font-family:JetBrains Mono;font-size:11px;color:{var_color}'>{d['Var1m']:+.1f}% 1m &nbsp;|&nbsp; <span style='color:{rsi_color}'>RSI {d['RSI']}</span></div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
 elif st.session_state.vista == "comparacion":
     st.markdown("<div style='padding:28px 0 4px'><div class='label-tag'>TU PORTAFOLIO VS MEJORES ETFs</div>"
