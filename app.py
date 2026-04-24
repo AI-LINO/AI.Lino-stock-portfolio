@@ -1252,15 +1252,47 @@ elif st.session_state.vista == "hmm":
                 colores_reg=[color_regimen(e) for e in estados]
                 fig=make_subplots(rows=2,cols=1,shared_xaxes=True,row_heights=[0.7,0.3],vertical_spacing=0.04,
                                   subplot_titles=[f"{ticker_hmm} — Precio con Régimen","Estado HMM"])
-                fig.add_trace(go.Scatter(x=fechas,y=serie.iloc[1:].values,name="Precio",line=dict(color="#e8e8f0",width=2)),row=1,col=1)
-                for e,color,lbl in [(2,"#00ff9d22","Alcista"),(1,"#f59e0b22","Lateral"),(0,"#ff446622","Bajista")]:
-                    mask=estados==e; x_fill=[]
-                    for j,m in enumerate(mask):
-                        if m: x_fill.append(fechas[j])
-                    if x_fill:
-                        fig.add_trace(go.Scatter(x=x_fill+x_fill[::-1],
-                            y=[serie.values.max()]*len(x_fill)+[serie.values.min()]*len(x_fill),
-                            fill="toself",fillcolor=color,line=dict(width=0),name=lbl,showlegend=True,opacity=0.5),row=1,col=1)
+                fig.add_trace(go.Scatter(x=fechas,y=serie.reindex(fechas).values,name="Precio",line=dict(color="#e8e8f0",width=2)),row=1,col=1)
+
+                # Sombreado por régimen usando vrect — evita el problema de
+                # concatenar timestamps con [::-1] que rompe Plotly
+                precio_vals = serie.reindex(fechas).values
+                y_max = float(np.nanmax(precio_vals)) if len(precio_vals) else 1
+                y_min = float(np.nanmin(precio_vals)) if len(precio_vals) else 0
+
+                for e, color_fill, lbl in [(2,"rgba(0,255,157,0.15)","Alcista"),
+                                           (1,"rgba(245,158,11,0.15)","Lateral"),
+                                           (0,"rgba(255,68,102,0.15)","Bajista")]:
+                    mask = estados == e
+                    # Detectar bloques continuos de cada estado
+                    in_block = False
+                    x0 = None
+                    for j, m in enumerate(mask):
+                        fecha_j = fechas[j]
+                        if m and not in_block:
+                            x0 = fecha_j
+                            in_block = True
+                        elif not m and in_block:
+                            fig.add_vrect(
+                                x0=x0, x1=fechas[j-1],
+                                fillcolor=color_fill, line_width=0,
+                                row=1, col=1
+                            )
+                            in_block = False
+                    # Cerrar bloque si termina en el último dato
+                    if in_block and x0 is not None:
+                        fig.add_vrect(
+                            x0=x0, x1=fechas[-1],
+                            fillcolor=color_fill, line_width=0,
+                            row=1, col=1
+                        )
+                    # Agregar leyenda manual como scatter invisible
+                    fig.add_trace(go.Scatter(
+                        x=[None], y=[None],
+                        mode="markers",
+                        marker=dict(color=color_fill.replace("0.15","1"), size=10, symbol="square"),
+                        name=lbl, showlegend=True
+                    ), row=1, col=1)
                 fig.add_trace(go.Scatter(x=fechas,y=estados,mode="markers",
                     marker=dict(color=colores_reg,size=4,symbol="square"),name="Estado",showlegend=False),row=2,col=1)
                 fig.update_yaxes(tickvals=[0,1,2],ticktext=["Bajista","Lateral","Alcista"],row=2,col=1)
