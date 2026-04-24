@@ -59,8 +59,12 @@ def guardar_datos(df, u):
 def cargar_datos(u):
     p = portfolio_path(u)
     if os.path.exists(p):
-        return pd.read_csv(p)
-    return pd.DataFrame(columns=["Ticker","Nombre","Compra","Cantidad","Mercado"])
+        df = pd.read_csv(p)
+        # Compatibilidad hacia atrás — si no existe columna Costo, calcularla
+        if "Costo" not in df.columns:
+            df["Costo"] = df["Compra"] * df["Cantidad"]
+        return df
+    return pd.DataFrame(columns=["Ticker","Nombre","Compra","Cantidad","Costo","Mercado"])
 
 def guardar_watchlist(df, u):
     os.makedirs(f"{DATA_DIR}/{u}", exist_ok=True)
@@ -249,38 +253,61 @@ def motor_avanzado(ticker):
     try:
         df = yf.download(ticker, period="3mo", interval="1d", progress=False)
         if df.empty: return None
-        close = df["Close"]
-        if hasattr(close,"columns"): close = close.iloc[:,0]
+
+        # FIX — extracción segura: funciona con Serie plana Y con DataFrame MultiIndex
+        raw = df["Close"]
+        if isinstance(raw, pd.DataFrame):
+            close = raw.iloc[:, 0]
+        elif isinstance(raw, pd.Series):
+            close = raw
+        else:
+            return None
+
         precios = close.dropna().values.flatten().astype(float)
-        if len(precios)<2: return None
-        xhat,P,Q,R = precios[0],1.0,1e-5,0.01**2
+        if len(precios) < 2: return None
+
+        xhat, P, Q, R = precios[0], 1.0, 1e-5, 0.01**2
         for p in precios:
-            Pm=P+Q; K=Pm/(Pm+R); xhat=xhat+K*(float(p)-xhat); P=(1-K)*Pm
+            Pm = P + Q
+            K  = Pm / (Pm + R)
+            xhat = xhat + K * (float(p) - xhat)
+            P    = (1 - K) * Pm
+
         return float(xhat), float(precios[-1])
-    except: return None
+    except:
+        return None
 
 @st.cache_data(ttl=300)
 def get_historico(ticker, period, interval="1d"):
     try:
         df = yf.download(ticker, period=period, interval=interval, progress=False)
         if df.empty: return None
-        close = df["Close"]
-        if hasattr(close,"columns"): close = close.iloc[:,0]
-        s = close.dropna()
+        raw = df["Close"]
+        if isinstance(raw, pd.DataFrame):
+            s = raw.iloc[:, 0]
+        elif isinstance(raw, pd.Series):
+            s = raw
+        else:
+            return None
+        s = s.dropna()
         s.index = pd.to_datetime(s.index)
         return s
-    except: return None
+    except:
+        return None
 
 @st.cache_data(ttl=300)
 def get_ohlcv(ticker, period="1y"):
     try:
         df = yf.download(ticker, period=period, interval="1d", progress=False)
         if df.empty: return None
-        if hasattr(df.columns,"levels"): df.columns = df.columns.droplevel(1)
+        # Aplanar MultiIndex si existe
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(1)
         df = df.dropna()
         df.index = pd.to_datetime(df.index)
         return df
-    except: return None
+    except:
+        return None
 
 # ─────────────────────────────────────────
 #  INDICADORES TÉCNICOS
@@ -316,54 +343,120 @@ def senal_combinada(rsi, macd_hist, precio, bb_upper, bb_lower):
     return score
 
 # ─────────────────────────────────────────
-#  HMM DE RÉGIMEN DE MERCADO
+#  HMM BIDIMENSIONAL — Simons style
+#  Dimensión 1: retornos logarítmicos
+#  Dimensión 2: volatilidad intrínseca
+#              (desviación estándar móvil)
 # ─────────────────────────────────────────
-def hmm_regimen(series, n_states=3, n_iter=100):
-    returns = np.log(series / series.shift(1)).dropna().values
-    T = len(returns)
+def hmm_regimen(series, n_states=3, n_iter=100, vol_window=10):
+    """
+    HMM Baum-Welch con observaciones 2D:
+      obs[:,0] = log-retornos  (dirección)
+      obs[:,1] = vol móvil normalizada (intensidad)
+    Estados: 0=Bajista, 1=Lateral, 2=Alcista
+    """
+    log_ret = np.log(series / series.shift(1)).dropna()
+    # Volatilidad intrínseca: std móvil de los retornos
+    vol_raw = log_ret.rolling(vol_window).std().dropna()
+
+    # Alinear ambas series al índice más corto
+    idx_com = log_ret.index.intersection(vol_raw.index)
+    ret = log_ret.reindex(idx_com).values.astype(float)
+    vol = vol_raw.reindex(idx_com).values.astype(float)
+
+    T = len(ret)
     if T < 30: return None, None
-    sorted_r = np.sort(returns)
-    tercio   = T // 3
-    means    = np.array([sorted_r[:tercio].mean(), sorted_r[tercio:2*tercio].mean(), sorted_r[2*tercio:].mean()])
-    stds     = np.array([sorted_r[:tercio].std()+1e-6, sorted_r[tercio:2*tercio].std()+1e-6, sorted_r[2*tercio:].std()+1e-6])
-    pi  = np.array([1/3, 1/3, 1/3])
-    A   = np.full((3,3), 1/3)
-    def emisiones(r, m, s):
-        return np.exp(-0.5*((r-m)/s)**2) / (s*np.sqrt(2*np.pi)) + 1e-300
+
+    # Normalizar vol a media 0, std 1 para misma escala que retornos
+    vol_mean = vol.mean()
+    vol_std  = vol.std() + 1e-9
+    vol_norm = (vol - vol_mean) / vol_std
+
+    # Observaciones 2D: [ret, vol_norm]
+    obs = np.stack([ret, vol_norm], axis=1)  # (T, 2)
+
+    # ── Inicializar con k-means 1D sobre retornos ──
+    sorted_idx = np.argsort(ret)
+    tercio = T // 3
+    # Medias 2D por estado inicial
+    means = np.array([
+        obs[sorted_idx[:tercio]].mean(axis=0),
+        obs[sorted_idx[tercio:2*tercio]].mean(axis=0),
+        obs[sorted_idx[2*tercio:]].mean(axis=0),
+    ])  # (3, 2)
+
+    # Covarianzas diagonales por estado (independencia entre dims)
+    covs = np.array([
+        np.diag(obs[sorted_idx[:tercio]].var(axis=0) + 1e-6),
+        np.diag(obs[sorted_idx[tercio:2*tercio]].var(axis=0) + 1e-6),
+        np.diag(obs[sorted_idx[2*tercio:]].var(axis=0) + 1e-6),
+    ])  # (3, 2, 2)
+
+    pi = np.array([1/3, 1/3, 1/3])
+    A  = np.full((3, 3), 1/3)
+
+    def log_gauss_2d(x, m, C):
+        """Log-verosimilitud gaussiana 2D con covarianza diagonal"""
+        diff = x - m
+        inv_diag = 1.0 / np.diag(C)
+        return -0.5 * (np.sum(diff**2 * inv_diag) + np.log(np.linalg.det(C)) + 2*np.log(2*np.pi))
+
+    def emisiones_2d(t_obs):
+        """Probabilidades de emisión para una observación"""
+        e = np.array([np.exp(log_gauss_2d(t_obs, means[k], covs[k])) + 1e-300
+                      for k in range(3)])
+        return e
+
     for _ in range(n_iter):
-        alpha = np.zeros((T,3))
-        alpha[0] = pi * emisiones(returns[0], means, stds)
-        alpha[0] /= alpha[0].sum()
-        scales = np.zeros(T)
-        scales[0] = alpha[0].sum() + 1e-300
-        for t in range(1,T):
-            em = emisiones(returns[t], means, stds)
+        # ── Forward ──
+        alpha = np.zeros((T, 3))
+        alpha[0] = pi * emisiones_2d(obs[0])
+        alpha[0] /= alpha[0].sum() + 1e-300
+        for t in range(1, T):
+            em = emisiones_2d(obs[t])
             alpha[t] = (alpha[t-1] @ A) * em
-            scales[t] = alpha[t].sum() + 1e-300
-            alpha[t] /= scales[t]
-        beta = np.zeros((T,3))
+            alpha[t] /= alpha[t].sum() + 1e-300
+
+        # ── Backward ──
+        beta = np.zeros((T, 3))
         beta[-1] = 1.0
-        for t in range(T-2,-1,-1):
-            em = emisiones(returns[t+1], means, stds)
+        for t in range(T-2, -1, -1):
+            em = emisiones_2d(obs[t+1])
             beta[t] = (A * em) @ beta[t+1]
             beta[t] /= beta[t].sum() + 1e-300
+
+        # ── Gamma y Xi ──
         gamma = alpha * beta
         gamma /= gamma.sum(axis=1, keepdims=True) + 1e-300
-        xi = np.zeros((T-1,3,3))
+
+        xi = np.zeros((T-1, 3, 3))
         for t in range(T-1):
-            em = emisiones(returns[t+1], means, stds)
+            em = emisiones_2d(obs[t+1])
             xi[t] = alpha[t:t+1].T * A * em * beta[t+1]
             xi[t] /= xi[t].sum() + 1e-300
-        pi   = gamma[0]
-        A    = xi.sum(axis=0) / (gamma[:-1].sum(axis=0, keepdims=True).T + 1e-300)
-        A    /= A.sum(axis=1, keepdims=True) + 1e-300
-        means = (gamma * returns[:,None]).sum(axis=0) / (gamma.sum(axis=0) + 1e-300)
-        stds  = np.sqrt((gamma * (returns[:,None]-means)**2).sum(axis=0) / (gamma.sum(axis=0)+1e-300)) + 1e-6
-    orden    = np.argsort(means)
-    estados  = np.argmax(gamma, axis=1)
-    mapa     = {orden[i]:i for i in range(3)}
-    estados  = np.array([mapa[e] for e in estados])
-    return estados, series.iloc[1:].index
+
+        # ── Re-estimación ──
+        pi = gamma[0]
+        A  = xi.sum(axis=0) / (gamma[:-1].sum(axis=0, keepdims=True).T + 1e-300)
+        A /= A.sum(axis=1, keepdims=True) + 1e-300
+
+        g_sum = gamma.sum(axis=0)  # (3,)
+        for k in range(3):
+            w = gamma[:, k]  # pesos del estado k
+            means[k] = (w[:, None] * obs).sum(axis=0) / (w.sum() + 1e-300)
+            diff = obs - means[k]
+            covs[k] = np.diag(
+                (w[:, None] * diff**2).sum(axis=0) / (w.sum() + 1e-300) + 1e-6
+            )
+
+    # ── Ordenar estados por retorno medio (dim 0) ──
+    orden   = np.argsort(means[:, 0])   # bajista→lateral→alcista
+    estados = np.argmax(gamma, axis=1)
+    mapa    = {orden[i]: i for i in range(3)}
+    estados = np.array([mapa[e] for e in estados])
+
+    # Devolver índice alineado al obs (sin los primeros vol_window días)
+    return estados, series.reindex(idx_com).index
 
 def nombre_regimen(estado):
     return ["🐻 BAJISTA","↔️ LATERAL","🐂 ALCISTA"][estado]
@@ -559,9 +652,44 @@ with st.sidebar:
                 for s in resultados
             }
             seleccion = st.selectbox("", list(opciones.keys()), label_visibility="collapsed")
+
+            # ── FIX 3: Costo base real con soporte de fracciones ──
+            st.markdown("""
+            <div style='font-size:10px;letter-spacing:2px;color:#444466;
+                        font-family:JetBrains Mono;margin:8px 0 4px'>
+            COSTO BASE
+            </div>""", unsafe_allow_html=True)
+
             col_a, col_b = st.columns(2)
-            p_compra = col_a.number_input("Precio", min_value=0.0, key="p_compra")
-            cant     = col_b.number_input("Cantidad", min_value=0.0, key="cant")
+            costo_total = col_a.number_input(
+                "Total invertido $",
+                min_value=0.0, value=0.0, step=10.0,
+                key="costo_total",
+                help="Cuánto dinero pusiste en total (ej: $500)"
+            )
+            cant = col_b.number_input(
+                "Acciones (fracciones ok)",
+                min_value=0.0, value=0.0, step=0.001,
+                format="%.4f",
+                key="cant",
+                help="Pueden ser fracciones (ej: 0.5, 1.25)"
+            )
+
+            # Precio promedio calculado automáticamente
+            if cant > 0 and costo_total > 0:
+                precio_promedio = costo_total / cant
+                st.markdown(f"""
+                <div style='background:#00ff9d0a;border:1px solid #00ff9d33;
+                            border-radius:8px;padding:8px 12px;margin:6px 0;
+                            font-family:JetBrains Mono;font-size:12px'>
+                    <span style='color:#444466'>Precio promedio:</span>
+                    <span style='color:#00ff9d;font-weight:700;margin-left:8px'>
+                        ${precio_promedio:.4f}
+                    </span>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                precio_promedio = costo_total / cant if cant > 0 else 0.0
 
             # ── Dos botones: portafolio o seguimiento ──
             st.markdown("<div style='font-size:10px;letter-spacing:2px;color:#444466;font-family:JetBrains Mono;margin-top:8px'>¿DÓNDE AGREGAR?</div>", unsafe_allow_html=True)
@@ -577,11 +705,20 @@ with st.sidebar:
             if add_port:
                 if ticker_final in st.session_state.portfolio["Ticker"].values:
                     st.warning(f"{ticker_final} ya está en el portafolio.")
+                elif costo_total <= 0 or cant <= 0:
+                    st.error("Ingresa el total invertido y las acciones.")
                 else:
-                    nuevo = pd.DataFrame([{"Ticker":ticker_final,"Nombre":nombre,"Compra":p_compra,"Cantidad":cant,"Mercado":mercado}])
+                    nuevo = pd.DataFrame([{
+                        "Ticker":   ticker_final,
+                        "Nombre":   nombre,
+                        "Compra":   round(precio_promedio, 6),   # precio por acción
+                        "Cantidad": round(cant, 6),               # soporta fracciones
+                        "Costo":    round(costo_total, 2),        # total invertido real
+                        "Mercado":  mercado,
+                    }])
                     st.session_state.portfolio = pd.concat([st.session_state.portfolio,nuevo],ignore_index=True)
                     guardar_datos(st.session_state.portfolio, U)
-                    st.success(f"✅ {ticker_final} → Portafolio")
+                    st.success(f"✅ {ticker_final} → Portafolio | ${costo_total:.2f} · {cant:.4f} acc")
                     st.rerun()
 
             if add_watch:
@@ -657,7 +794,9 @@ with st.sidebar:
                     </div>
                     <div style='text-align:right'>
                         <div style='font-family:JetBrains Mono;font-size:15px;font-weight:700;color:{rend_color}'>{rend_str}</div>
-                        <div style='font-size:10px;color:#556;font-family:JetBrains Mono'>{row['Cantidad']} acc · ${float(row['Compra']):.2f}</div>
+                        <div style='font-size:10px;color:#556;font-family:JetBrains Mono'>
+                            {float(row['Cantidad']):.4f} acc · ${float(row['Compra']):.4f}
+                        </div>
                     </div>
                 </div>
                 <div style='margin-top:8px;background:#ffffff11;border-radius:4px;height:4px;overflow:hidden'>
@@ -693,16 +832,23 @@ if st.session_state.vista == "dashboard":
         resumen=[]; total_act=0; total_cmp=0
         for i in range(len(port)):
             row=port.iloc[i]; stats=motor_avanzado(row["Ticker"])
-            compra,cantidad=float(row["Compra"]),float(row["Cantidad"])
+            compra   = float(row["Compra"])
+            cantidad = float(row["Cantidad"])
+            # FIX 3: usar Costo real (total invertido) si existe
+            costo_base = float(row["Costo"]) if "Costo" in row.index and float(row.get("Costo",0))>0 \
+                         else compra * cantidad
             if stats:
-                trend,actual=stats; rend=((actual-compra)/compra*100) if compra>0 else 0
-                val=actual*cantidad; estado="VENDER (Techo)" if actual>trend*1.05 else "MANTENER"
+                trend,actual=stats
+                rend=((actual*cantidad - costo_base) / costo_base * 100) if costo_base>0 else 0
+                val=actual*cantidad
+                estado="VENDER (Techo)" if actual>trend*1.05 else "MANTENER"
             else:
-                actual,rend,val,estado=compra,0,compra*cantidad,"SIN DATOS"
-            total_act+=val; total_cmp+=compra*cantidad
+                actual,rend,val,estado=compra,0,costo_base,"SIN DATOS"
+            total_act+=val; total_cmp+=costo_base
             resumen.append({"idx":i,"Ticker":row["Ticker"],"Nombre":row["Nombre"],
                             "Mercado":row["Mercado"],"Rendimiento":round(rend,2),
-                            "Valor Actual":round(val,2),"Acción":estado})
+                            "Valor Actual":round(val,2),"Costo Base":round(costo_base,2),
+                            "Acciones":round(cantidad,4),"Acción":estado})
         df_res=pd.DataFrame(resumen)
         rend_total=((total_act-total_cmp)/total_cmp*100) if total_cmp>0 else 0
         delta_dol=total_act-total_cmp
