@@ -1314,8 +1314,20 @@ elif st.session_state.vista == "backtest":
                               yaxis=dict(gridcolor="#1c1c30",color="#444466",title="Valor ($)"))
             st.plotly_chart(fig, use_container_width=True)
             if not res["trades"].empty:
-                st.markdown("<div class='label-tag'>Log de operaciones</div>",unsafe_allow_html=True)
-                st.dataframe(res["trades"].style.applymap(lambda v:"color:#00ff9d" if v=="COMPRA" else "color:#ff4466" if v=="VENTA" else "",subset=["Tipo"]),use_container_width=True,height=220)
+                st.markdown("<div class='label-tag'>Log de operaciones</div>", unsafe_allow_html=True)
+                trades_df = res["trades"].copy()
+                try:
+                    # pandas >= 2.1 usa .map(), versiones anteriores usan .applymap()
+                    styled = trades_df.style.map(
+                        lambda v: "color:#00ff9d" if v=="COMPRA" else "color:#ff4466" if v=="VENTA" else "",
+                        subset=["Tipo"]
+                    )
+                except AttributeError:
+                    styled = trades_df.style.applymap(
+                        lambda v: "color:#00ff9d" if v=="COMPRA" else "color:#ff4466" if v=="VENTA" else "",
+                        subset=["Tipo"]
+                    )
+                st.dataframe(styled, use_container_width=True, height=220)
 
 elif st.session_state.vista == "pairs":
     st.markdown("<div style='padding:28px 0 4px'><div class='label-tag'>PAIRS TRADING — ARBITRAJE ESTADÍSTICO</div>"
