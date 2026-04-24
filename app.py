@@ -466,12 +466,16 @@ with st.sidebar:
             row   = port.iloc[i]
             stats = motor_avanzado(row["Ticker"])
             if stats:
-                _, actual = stats
-                compra = float(row["Compra"])
-                rend   = ((actual - compra) / compra * 100) if compra > 0 else 0.0
+                trend, actual = stats
+                compra  = float(row["Compra"])
+                rend    = ((actual - compra) / compra * 100) if compra > 0 else 0.0
+                # ── Señal de techo Kalman ──
+                techo   = actual > trend * 1.05
             else:
-                rend = None
+                rend  = None
+                techo = False
 
+            # ── Paleta por rendimiento ──
             if rend is None:
                 card_class="stock-card-neutral"; emoji="⚪"; rend_str="Sin datos"; rend_color="#888"; barra_pct=50; barra_color="#888"
             elif rend >= 15:
@@ -484,6 +488,23 @@ with st.sidebar:
                 card_class="stock-card-down"; emoji="📉"; rend_str=f"▼ {abs(rend):.2f}%"; rend_color="#ef4444"; barra_pct=max(0,int(50+rend*2)); barra_color="#ef4444"
             else:
                 card_class="stock-card-crash"; emoji="🔴"; rend_str=f"▼ {abs(rend):.2f}%"; rend_color="#ff0044"; barra_pct=max(0,int(50+rend)); barra_color="#ff0044"
+
+            # ── Si hay alerta de techo, sobreescribir card a modo alerta ──
+            if techo:
+                card_class = "stock-card-crash"
+                emoji      = "🚨"
+
+            # ── Badge de alerta de venta ──
+            alerta_html = ""
+            if techo:
+                alerta_html = """
+                <div style='margin-top:8px;background:#ff004422;border:1px solid #ff0044;
+                            border-radius:6px;padding:5px 8px;text-align:center;
+                            font-family:JetBrains Mono;font-size:11px;font-weight:700;
+                            color:#ff0044;letter-spacing:1px;
+                            animation:pulse-red 1.5s infinite'>
+                    🚨 ALERTA — CONSIDERAR VENTA
+                </div>"""
 
             st.markdown(f"""
             <div class='{card_class}'>
@@ -501,6 +522,7 @@ with st.sidebar:
                 <div style='margin-top:8px;background:#ffffff11;border-radius:4px;height:4px;overflow:hidden'>
                     <div style='width:{barra_pct}%;height:100%;background:{barra_color};border-radius:4px'></div>
                 </div>
+                {alerta_html}
             </div>
             """, unsafe_allow_html=True)
 
@@ -554,8 +576,35 @@ if st.session_state.vista == "dashboard":
         m1,m2,m3=st.columns(3)
         m1.metric("💰 Valor Actual",f"${total_act:,.2f}",f"{signo}${abs(delta_dol):,.2f}")
         m2.metric("📦 Posiciones",len(df_res))
-        m3.metric("🚨 Alertas",len(df_res[df_res["Acción"]=="VENDER (Techo)"]))
-        st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
+        alertas_df = df_res[df_res["Acción"]=="VENDER (Techo)"]
+        m3.metric("🚨 Alertas",len(alertas_df))
+
+        # ── Banner de alertas grandes ──
+        if not alertas_df.empty:
+            tickers_alerta = " · ".join(alertas_df["Ticker"].tolist())
+            st.markdown(f"""
+            <div style='background:linear-gradient(135deg,#ff004433,#ff004418);
+                        border:2px solid #ff0044;border-radius:14px;
+                        padding:18px 22px;margin:12px 0;
+                        animation:pulse-red 1.5s infinite;'>
+                <div style='font-family:JetBrains Mono;font-size:11px;letter-spacing:3px;
+                            color:#ff004499;text-transform:uppercase;margin-bottom:6px'>
+                    ⚠️ Alerta Kalman — Techo detectado
+                </div>
+                <div style='font-size:22px;font-weight:800;color:#ff0044;letter-spacing:-0.5px'>
+                    🚨 CONSIDERAR VENTA
+                </div>
+                <div style='font-family:JetBrains Mono;font-size:15px;color:#ff4466;
+                            margin-top:8px;font-weight:600'>
+                    {tickers_alerta}
+                </div>
+                <div style='font-size:12px;color:#ff004488;margin-top:6px'>
+                    El precio superó +5% la tendencia filtrada por Kalman — señal de sobrecompra
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
         colores=["#00ff9d" if x>0 else "#ff4466" if x<0 else "#444466" for x in df_res["Rendimiento"]]
         fig=go.Figure(go.Bar(x=df_res["Ticker"],y=df_res["Rendimiento"],marker=dict(color=colores),
             text=[f"{v:+.2f}%" for v in df_res["Rendimiento"]],textposition="outside",
