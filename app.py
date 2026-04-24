@@ -5,37 +5,80 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from itertools import combinations
-import os, warnings
+import os, warnings, hashlib, json
 warnings.filterwarnings("ignore")
 
 # ─────────────────────────────────────────
-#  PERSISTENCIA
+#  MULTI-USUARIO — cada usuario tiene su
+#  propia carpeta con sus datos separados
 # ─────────────────────────────────────────
-FILE_PATH      = "portfolio_data.csv"
-WATCHLIST_PATH = "watchlist_data.csv"
+USERS_FILE = "users.json"
+DATA_DIR   = "user_data"
+os.makedirs(DATA_DIR, exist_ok=True)
 
-def guardar_datos(df):
-    df.to_csv(FILE_PATH, index=False)
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
 
-def cargar_datos():
-    if os.path.exists(FILE_PATH):
-        return pd.read_csv(FILE_PATH)
+def cargar_usuarios() -> dict:
+    if os.path.exists(USERS_FILE):
+        with open(USERS_FILE) as f:
+            return json.load(f)
+    return {}
+
+def guardar_usuarios(users: dict):
+    with open(USERS_FILE, "w") as f:
+        json.dump(users, f)
+
+def registrar_usuario(username: str, password: str) -> tuple[bool, str]:
+    users = cargar_usuarios()
+    u = username.lower().strip()
+    if not u or len(u) < 3:
+        return False, "El usuario debe tener al menos 3 caracteres."
+    if not password or len(password) < 4:
+        return False, "La contraseña debe tener al menos 4 caracteres."
+    if u in users:
+        return False, "Ese usuario ya existe."
+    users[u] = hash_password(password)
+    guardar_usuarios(users)
+    os.makedirs(f"{DATA_DIR}/{u}", exist_ok=True)
+    return True, "✅ Cuenta creada. Ya puedes iniciar sesión."
+
+def verificar_login(username: str, password: str) -> bool:
+    users = cargar_usuarios()
+    u = username.lower().strip()
+    return u in users and users[u] == hash_password(password)
+
+# Rutas de datos por usuario
+def portfolio_path(u):  return f"{DATA_DIR}/{u}/portfolio.csv"
+def watchlist_path(u):  return f"{DATA_DIR}/{u}/watchlist.csv"
+
+def guardar_datos(df, u):
+    os.makedirs(f"{DATA_DIR}/{u}", exist_ok=True)
+    df.to_csv(portfolio_path(u), index=False)
+
+def cargar_datos(u):
+    p = portfolio_path(u)
+    if os.path.exists(p):
+        return pd.read_csv(p)
     return pd.DataFrame(columns=["Ticker","Nombre","Compra","Cantidad","Mercado"])
 
-def guardar_watchlist(df):
-    df.to_csv(WATCHLIST_PATH, index=False)
+def guardar_watchlist(df, u):
+    os.makedirs(f"{DATA_DIR}/{u}", exist_ok=True)
+    df.to_csv(watchlist_path(u), index=False)
 
-def cargar_watchlist():
-    if os.path.exists(WATCHLIST_PATH):
-        return pd.read_csv(WATCHLIST_PATH)
+def cargar_watchlist(u):
+    p = watchlist_path(u)
+    if os.path.exists(p):
+        return pd.read_csv(p)
     return pd.DataFrame(columns=["Ticker","Nombre","Mercado"])
 
-if "portfolio" not in st.session_state:
-    st.session_state.portfolio = cargar_datos()
-if "watchlist" not in st.session_state:
-    st.session_state.watchlist = cargar_watchlist()
-if "vista" not in st.session_state:
-    st.session_state.vista = "dashboard"
+# ── Session state base ──
+if "logged_in"  not in st.session_state: st.session_state.logged_in  = False
+if "username"   not in st.session_state: st.session_state.username   = ""
+if "auth_mode"  not in st.session_state: st.session_state.auth_mode  = "login"
+if "portfolio"  not in st.session_state: st.session_state.portfolio  = pd.DataFrame()
+if "watchlist"  not in st.session_state: st.session_state.watchlist  = pd.DataFrame()
+if "vista"      not in st.session_state: st.session_state.vista      = "dashboard"
 
 # ─────────────────────────────────────────
 #  CONFIG & CSS
@@ -402,10 +445,65 @@ BENCHMARKS = {
 PERIODOS = {"1 semana":"5d","1 mes":"1mo","6 meses":"6mo","1 año":"1y","Máx":"5y"}
 
 # ─────────────────────────────────────────
+#  PANTALLA DE LOGIN / REGISTRO
+# ─────────────────────────────────────────
+if not st.session_state.logged_in:
+    # Centrar con columnas
+    _, col, _ = st.columns([1, 2, 1])
+    with col:
+        st.markdown("""
+        <div style='text-align:center;padding:40px 0 24px'>
+            <div style='font-family:Syne;font-size:36px;font-weight:800;color:#e8e8f0'>
+                AI<span style='color:#00ff9d'>.lino</span> PRO
+            </div>
+            <div style='font-family:JetBrains Mono;font-size:11px;letter-spacing:3px;
+                        color:#444466;margin-top:4px'>QUANT ENGINE · MULTI-USUARIO</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        modo = st.radio("", ["🔑  Iniciar sesión", "📝  Crear cuenta"],
+                        horizontal=True, label_visibility="collapsed")
+
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+        user_in = st.text_input("Usuario", placeholder="tu_usuario", key="auth_user")
+        pass_in = st.text_input("Contraseña", type="password", placeholder="••••••••", key="auth_pass")
+
+        if modo == "🔑  Iniciar sesión":
+            if st.button("Entrar →", use_container_width=True):
+                if verificar_login(user_in, pass_in):
+                    u = user_in.lower().strip()
+                    st.session_state.logged_in = True
+                    st.session_state.username  = u
+                    st.session_state.portfolio = cargar_datos(u)
+                    st.session_state.watchlist = cargar_watchlist(u)
+                    st.rerun()
+                else:
+                    st.error("Usuario o contraseña incorrectos.")
+        else:
+            if st.button("Crear cuenta →", use_container_width=True):
+                ok, msg = registrar_usuario(user_in, pass_in)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+
+        st.markdown("""
+        <div style='text-align:center;margin-top:24px;font-size:12px;color:#444466'>
+            Cada usuario tiene su portafolio y seguimiento privado e independiente.
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.stop()   # ← nada más se ejecuta si no hay sesión
+
+# ── Shortcut al usuario activo ──
+U = st.session_state.username
+
+# ─────────────────────────────────────────
 #  SIDEBAR
 # ─────────────────────────────────────────
 with st.sidebar:
-    st.markdown("""
+    st.markdown(f"""
     <div style='padding:20px 4px 8px'>
         <div style='font-family:Syne;font-size:22px;font-weight:800;color:#e8e8f0'>
             AI<span style='color:#00ff9d'>.lino</span> PRO
@@ -413,9 +511,22 @@ with st.sidebar:
         <div style='font-family:JetBrains Mono;font-size:10px;letter-spacing:3px;color:#444466;margin-top:2px'>
             QUANT ENGINE v3
         </div>
+        <div style='margin-top:10px;background:#00ff9d11;border:1px solid #00ff9d33;
+                    border-radius:8px;padding:6px 10px;font-family:JetBrains Mono;
+                    font-size:12px;color:#00ff9d'>
+            👤 {U}
+        </div>
     </div>
-    <hr style='border-color:#1c1c30;margin:8px 0 16px'>
+    <hr style='border-color:#1c1c30;margin:8px 0 12px'>
     """, unsafe_allow_html=True)
+
+    if st.button("🚪 Cerrar sesión", use_container_width=True, type="secondary"):
+        st.session_state.logged_in = False
+        st.session_state.username  = ""
+        st.session_state.portfolio = pd.DataFrame()
+        st.session_state.watchlist = pd.DataFrame()
+        st.session_state.vista     = "dashboard"
+        st.rerun()
 
     vistas = {
         "📊  Dashboard":       "dashboard",
@@ -469,7 +580,7 @@ with st.sidebar:
                 else:
                     nuevo = pd.DataFrame([{"Ticker":ticker_final,"Nombre":nombre,"Compra":p_compra,"Cantidad":cant,"Mercado":mercado}])
                     st.session_state.portfolio = pd.concat([st.session_state.portfolio,nuevo],ignore_index=True)
-                    guardar_datos(st.session_state.portfolio)
+                    guardar_datos(st.session_state.portfolio, U)
                     st.success(f"✅ {ticker_final} → Portafolio")
                     st.rerun()
 
@@ -479,7 +590,7 @@ with st.sidebar:
                 else:
                     nuevo = pd.DataFrame([{"Ticker":ticker_final,"Nombre":nombre,"Mercado":mercado}])
                     st.session_state.watchlist = pd.concat([st.session_state.watchlist,nuevo],ignore_index=True)
-                    guardar_watchlist(st.session_state.watchlist)
+                    guardar_watchlist(st.session_state.watchlist, U)
                     st.success(f"👁️ {ticker_final} → Seguimiento")
                     st.rerun()
         else:
@@ -561,7 +672,7 @@ with st.sidebar:
                     st.session_state.portfolio.reset_index(drop=True)
                     .drop(index=i).reset_index(drop=True)
                 )
-                guardar_datos(st.session_state.portfolio)
+                guardar_datos(st.session_state.portfolio, U)
                 st.rerun()
 
 # ═══════════════════════════════════════════════
@@ -695,7 +806,7 @@ if st.session_state.vista == "dashboard":
                             st.session_state.portfolio.reset_index(drop=True)
                             .drop(index=int(r["idx"])).reset_index(drop=True)
                         )
-                        guardar_datos(st.session_state.portfolio); st.rerun()
+                        guardar_datos(st.session_state.portfolio, U); st.rerun()
 
 elif st.session_state.vista == "seguimiento":
     st.markdown("<div style='padding:28px 0 4px'><div class='label-tag'>RADAR DE MERCADO</div>"
@@ -798,7 +909,7 @@ elif st.session_state.vista == "seguimiento":
                         st.session_state.watchlist.reset_index(drop=True)
                         .drop(index=d["idx"]).reset_index(drop=True)
                     )
-                    guardar_watchlist(st.session_state.watchlist)
+                    guardar_watchlist(st.session_state.watchlist, U)
                     st.rerun()
 
         # ── Tabla resumen ──
