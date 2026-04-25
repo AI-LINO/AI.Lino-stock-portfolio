@@ -135,12 +135,14 @@ def cargar_watchlist(u):
     return pd.DataFrame(columns=["Ticker","Nombre","Mercado"])
 
 # ── Session state base ──
-if "logged_in"  not in st.session_state: st.session_state.logged_in  = False
-if "username"   not in st.session_state: st.session_state.username   = ""
-if "auth_mode"  not in st.session_state: st.session_state.auth_mode  = "login"
-if "portfolio"  not in st.session_state: st.session_state.portfolio  = pd.DataFrame()
-if "watchlist"  not in st.session_state: st.session_state.watchlist  = pd.DataFrame()
-if "vista"      not in st.session_state: st.session_state.vista      = "dashboard"
+if "logged_in"    not in st.session_state: st.session_state.logged_in    = False
+if "username"     not in st.session_state: st.session_state.username     = ""
+if "auth_mode"    not in st.session_state: st.session_state.auth_mode    = "login"
+if "portfolio"    not in st.session_state: st.session_state.portfolio    = pd.DataFrame()
+if "watchlist"    not in st.session_state: st.session_state.watchlist    = pd.DataFrame()
+if "vista"        not in st.session_state: st.session_state.vista        = "dashboard"
+if "moneda_base"  not in st.session_state: st.session_state.moneda_base  = "USD"
+if "refresh_tick" not in st.session_state: st.session_state.refresh_tick = 0
 
 # ─────────────────────────────────────────
 #  CONFIG & CSS
@@ -472,15 +474,64 @@ def get_fundamentales(ticker):
         }
     except:
         return None
+
+# ─────────────────────────────────────────
+#  TIPO DE CAMBIO — conversión multi-divisa
+# ─────────────────────────────────────────
+# TTL corto para datos frescos en tiempo real
+@st.cache_data(ttl=60)
+def get_tipo_cambio(moneda_origen, moneda_destino):
+    """Obtiene el tipo de cambio entre dos monedas via yfinance"""
+    if moneda_origen == moneda_destino:
+        return 1.0
+    par = f"{moneda_origen}{moneda_destino}=X"
     try:
-        df = yf.download(ticker, period=period, interval="1d", progress=False)
+        t = yf.Ticker(par)
+        precio = (t.info.get("regularMarketPrice") or
+                  t.info.get("currentPrice") or
+                  t.info.get("previousClose"))
+        if precio:
+            return float(precio)
+    except:
+        pass
+    return 1.0
+
+@st.cache_data(ttl=60)
+def get_moneda_ticker(ticker):
+    """Detecta la moneda de cotización de un ticker"""
+    try:
+        info = yf.Ticker(ticker).info
+        return info.get("currency", "USD").upper()
+    except:
+        # Inferir por sufijo
+        if ticker.endswith(".MX"): return "MXN"
+        if ticker.endswith(".L"):  return "GBP"
+        if ticker.endswith(".PA") or ticker.endswith(".DE") or ticker.endswith(".MC"): return "EUR"
+        if ticker.endswith(".SA"): return "BRL"
+        return "USD"
+
+# ─────────────────────────────────────────
+#  MOTOR CUANTITATIVO — con conversión divisa
+# ─────────────────────────────────────────
+# TTL=60s para precios casi en tiempo real
+@st.cache_data(ttl=60)
+def motor_avanzado(ticker):
+    """Kalman filter + precio actual. TTL=60s para refresh frecuente."""
+    try:
+        df = yf.download(ticker, period="3mo", interval="1d", progress=False)
         if df.empty: return None
-        # Aplanar MultiIndex si existe
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(1)
-        df = df.dropna()
-        df.index = pd.to_datetime(df.index)
-        return df
+        raw = df["Close"]
+        if isinstance(raw, pd.DataFrame): close = raw.iloc[:, 0]
+        elif isinstance(raw, pd.Series):  close = raw
+        else: return None
+        precios = close.dropna().values.flatten().astype(float)
+        if len(precios) < 2: return None
+        xhat, P, Q, R = precios[0], 1.0, 1e-5, 0.01**2
+        for p in precios:
+            Pm = P + Q; K = Pm / (Pm + R)
+            xhat = xhat + K * (float(p) - xhat); P = (1 - K) * Pm
+        moneda = get_moneda_ticker(ticker)
+        return float(xhat), float(precios[-1]), moneda
     except:
         return None
 
@@ -796,6 +847,48 @@ with st.sidebar:
         st.session_state.vista     = "dashboard"
         st.rerun()
 
+    # ── Moneda base ──
+    st.markdown("<div class='label-tag' style='margin-top:10px'>Moneda base</div>",
+                unsafe_allow_html=True)
+    moneda_opts = {"🇺🇸 USD": "USD", "🇲🇽 MXN": "MXN", "🇪🇺 EUR": "EUR"}
+    moneda_sel = st.radio("", list(moneda_opts.keys()),
+                          index=list(moneda_opts.values()).index(st.session_state.moneda_base),
+                          horizontal=True, label_visibility="collapsed")
+    st.session_state.moneda_base = moneda_opts[moneda_sel]
+    MONEDA = st.session_state.moneda_base
+
+    # ── Auto-refresh ──
+    import time as _time
+    ahora = _time.strftime("%H:%M:%S")
+    st.markdown(f"""
+    <div style='background:#0a0a16;border:1px solid #1c1c30;border-radius:8px;
+                padding:8px 12px;margin:8px 0;display:flex;justify-content:space-between;
+                align-items:center'>
+        <span style='font-family:JetBrains Mono;font-size:10px;color:#444466'>
+            🔄 Última act.
+        </span>
+        <span style='font-family:JetBrains Mono;font-size:11px;color:#00ff9d'>{ahora}</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Auto-refresh cada 60 segundos usando st.rerun con time_input dummy
+    # Streamlit no tiene auto-refresh nativo, usamos fragment trick vía JS
+    st.components.v1.html("""
+    <script>
+    // Recargar la página cada 60 segundos para obtener precios frescos
+    if (!window._ailino_refresh) {
+        window._ailino_refresh = true;
+        setTimeout(function refresh() {
+            // Simular click en cualquier widget para forzar rerun de Streamlit
+            var btns = window.parent.document.querySelectorAll('[data-testid="stButton"] button');
+            // En lugar de click, usar postMessage a Streamlit
+            window.parent.postMessage({type: 'streamlit:rerun'}, '*');
+            setTimeout(refresh, 60000);
+        }, 60000);
+    }
+    </script>
+    """, height=0)
+
     vistas = {
         "📊  Dashboard":        "dashboard",
         "👁️  Seguimiento":      "seguimiento",
@@ -950,12 +1043,12 @@ with st.sidebar:
             row   = port.iloc[i]
             stats = motor_avanzado(row["Ticker"])
             if stats:
-                trend, actual = stats
+                trend, actual, moneda_acc = stats
                 compra  = float(row["Compra"])
                 rend    = ((actual - compra) / compra * 100) if compra > 0 else 0.0
-                # ── Señal de techo Kalman ──
                 techo   = actual > trend * 1.05
             else:
+                moneda_acc = "USD"
                 rend  = None
                 techo = False
 
@@ -1035,39 +1128,55 @@ if st.session_state.vista == "dashboard":
             <div style='color:#444466;font-size:14px;margin-top:8px'>Agrega acciones con el panel izquierdo</div>
         </div>""", unsafe_allow_html=True)
     else:
+        MONEDA = st.session_state.moneda_base
         resumen=[]; total_act=0; total_cmp=0
         for i in range(len(port)):
             row=port.iloc[i]; stats=motor_avanzado(row["Ticker"])
             compra   = float(row["Compra"])
             cantidad = float(row["Cantidad"])
-            # FIX 3: usar Costo real (total invertido) si existe
             costo_base = float(row["Costo"]) if "Costo" in row.index and float(row.get("Costo",0))>0 \
                          else compra * cantidad
             if stats:
-                trend,actual=stats
-                rend=((actual*cantidad - costo_base) / costo_base * 100) if costo_base>0 else 0
-                val=actual*cantidad
-                estado="VENDER (Techo)" if actual>trend*1.05 else "MANTENER"
+                trend, actual, moneda_acc = stats
+                # Conversión de divisa al precio actual
+                fx = get_tipo_cambio(moneda_acc, MONEDA)
+                actual_conv    = actual    * fx
+                costo_base_conv= costo_base * get_tipo_cambio(
+                    moneda_acc if moneda_acc else "USD", MONEDA)
+                rend = ((actual_conv*cantidad - costo_base_conv) / costo_base_conv * 100) \
+                       if costo_base_conv > 0 else 0
+                val  = actual_conv * cantidad
+                estado = "VENDER (Techo)" if actual > trend * 1.05 else "MANTENER"
+                precio_str = f"{moneda_acc} {actual:,.2f} → {MONEDA} {actual_conv:,.2f}"
             else:
-                actual,rend,val,estado=compra,0,costo_base,"SIN DATOS"
-            total_act+=val; total_cmp+=costo_base
+                moneda_acc = "USD"
+                actual, rend, val, estado = compra, 0, costo_base, "SIN DATOS"
+                costo_base_conv = costo_base
+                precio_str = "—"
+            total_act += val; total_cmp += costo_base_conv
             resumen.append({"idx":i,"Ticker":row["Ticker"],"Nombre":row["Nombre"],
-                            "Mercado":row["Mercado"],"Rendimiento":round(rend,2),
-                            "Valor Actual":round(val,2),"Costo Base":round(costo_base,2),
-                            "Acciones":round(cantidad,4),"Acción":estado})
+                            "Mercado":row["Mercado"],"Moneda":moneda_acc,
+                            "Rendimiento":round(rend,2),
+                            "Valor Actual":round(val,2),"Costo Base":round(costo_base_conv,2),
+                            "Acciones":round(cantidad,4),"Acción":estado,
+                            "Precio":precio_str})
         df_res=pd.DataFrame(resumen)
         rend_total=((total_act-total_cmp)/total_cmp*100) if total_cmp>0 else 0
-        delta_dol=total_act-total_cmp
+        delta=total_act-total_cmp
         color_h="#00ff9d" if rend_total>=0 else "#ff4466"
         signo="+" if rend_total>=0 else ""
+
+        # Símbolo de moneda
+        SIM = {"USD":"$","MXN":"$","EUR":"€"}.get(MONEDA,"$")
+
         st.markdown(f"""<div style='margin-bottom:20px'>
             <div class='hero-pct' style='color:{color_h}'>{signo}{rend_total:.2f}%</div>
             <div style='font-family:JetBrains Mono;font-size:14px;color:{color_h};margin-top:6px'>
-                {'▲' if delta_dol>=0 else '▼'} ${abs(delta_dol):,.2f}
+                {'▲' if delta>=0 else '▼'} {SIM}{abs(delta):,.2f} {MONEDA}
                 <span style='color:#444466;margin-left:8px'>total P&L</span>
             </div></div>""", unsafe_allow_html=True)
         m1,m2,m3=st.columns(3)
-        m1.metric("💰 Valor Actual",f"${total_act:,.2f}",f"{signo}${abs(delta_dol):,.2f}")
+        m1.metric(f"💰 Valor Actual ({MONEDA})",f"{SIM}{total_act:,.2f}",f"{signo}{SIM}{abs(delta):,.2f}")
         m2.metric("📦 Posiciones",len(df_res))
         alertas_df = df_res[df_res["Acción"]=="VENDER (Techo)"]
         m3.metric("🚨 Alertas",len(alertas_df))
