@@ -899,6 +899,7 @@ with st.sidebar:
         "📈  Backtesting":      "backtest",
         "🔗  Pairs Trading":    "pairs",
         "⚖️  Kelly Sizing":     "kelly",
+        "🧪  Lab Quant":        "lab",
     }
     for label, key in vistas.items():
         active = st.session_state.vista == key
@@ -2043,3 +2044,748 @@ elif st.session_state.vista == "fundamental":
                     f"Score fundamental: {prom:.1f} sobre 2 puntos."
                 )
                 st.components.v1.html(audio_tts_html(texto_fund), height=60)
+
+# ═══════════════════════════════════════════════════════════
+#  🧪 LAB QUANT — Motor cuantitativo avanzado
+# ═══════════════════════════════════════════════════════════
+elif st.session_state.vista == "lab":
+    import time as _t
+
+    st.markdown("""
+    <div style='padding:28px 0 8px'>
+        <div class='label-tag'>LABORATORIO CUANTITATIVO</div>
+        <div style='font-size:28px;font-weight:800;letter-spacing:-0.5px'>🧪 Lab Quant</div>
+        <div style='color:#666;font-size:13px;margin-top:6px'>
+            Walk-Forward · HMM Ensemble · Particle Filter · Kelly con Correlaciones
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    port = st.session_state.portfolio.reset_index(drop=True)
+    tickers_port = port["Ticker"].tolist() if not port.empty else []
+
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📊 Walk-Forward",
+        "🧬 HMM Ensemble",
+        "🌊 Particle Filter",
+        "⚖️ Kelly Correlaciones"
+    ])
+
+    # ─────────────────────────────────────────
+    #  TAB 1 — WALK-FORWARD OPTIMIZATION
+    # ─────────────────────────────────────────
+    with tab1:
+        st.markdown("""
+        <div style='color:#888;font-size:13px;margin-bottom:16px'>
+        Divide el historial en ventanas: entrena la estrategia en cada ventana
+        y valida en la siguiente. Mide si la estrategia es consistente en el tiempo
+        o solo funcionó por suerte en un período específico.
+        </div>
+        """, unsafe_allow_html=True)
+
+        col1, col2, col3 = st.columns(3)
+        wf_ticker  = col1.text_input("Ticker", value=tickers_port[0] if tickers_port else "SPY", key="wf_t")
+        wf_ventana = col2.selectbox("Ventana entrenamiento", [60,90,120,180], index=1, key="wf_v")
+        wf_test    = col3.selectbox("Ventana validación (días)", [20,30,45,60], index=1, key="wf_te")
+        wf_capital = st.number_input("Capital inicial $", value=10000.0, step=1000.0, key="wf_c")
+
+        if st.button("▶ Ejecutar Walk-Forward", use_container_width=True, key="wf_run"):
+            with st.spinner("Ejecutando walk-forward optimization…"):
+
+                df_wf = get_ohlcv(wf_ticker, "5y")
+                if df_wf is None or len(df_wf) < wf_ventana + wf_test + 30:
+                    st.error("Datos insuficientes. Intenta con período más corto o ticker diferente.")
+                else:
+                    close_wf = df_wf["Close"].astype(float)
+
+                    def run_estrategia_ventana(prices_train, prices_test, capital):
+                        """RSI+MACD calibrado en train, ejecutado en test"""
+                        # Calcular señales sobre train para definir umbrales óptimos
+                        rsi_tr   = calcular_rsi(prices_train)
+                        macd_tr, _, hist_tr = calcular_macd(prices_train)
+
+                        # Umbral RSI adaptativo: percentil 25 y 75 del train
+                        rsi_vals = rsi_tr.dropna().values
+                        umbral_bajo = float(np.percentile(rsi_vals, 25)) if len(rsi_vals) else 35
+                        umbral_alto = float(np.percentile(rsi_vals, 75)) if len(rsi_vals) else 65
+
+                        # Ejecutar en test
+                        rsi_te   = calcular_rsi(pd.concat([prices_train.iloc[-30:], prices_test]))
+                        _, _, hist_te = calcular_macd(pd.concat([prices_train.iloc[-30:], prices_test]))
+                        rsi_te   = rsi_te.iloc[-len(prices_test):]
+                        hist_te  = hist_te.iloc[-len(prices_test):]
+
+                        pos = 0; cap = capital; acc = 0
+                        vals = []; trades_n = 0; wins = 0
+
+                        for j in range(len(prices_test)):
+                            p  = float(prices_test.iloc[j])
+                            r  = float(rsi_te.iloc[j])  if not np.isnan(rsi_te.iloc[j])  else 50
+                            mh = float(hist_te.iloc[j]) if not np.isnan(hist_te.iloc[j]) else 0
+                            precio_entrada = None
+
+                            if pos == 0 and r < umbral_bajo and mh > 0 and cap > 0:
+                                acc = cap / p; cap = 0; pos = 1
+                                precio_entrada = p; trades_n += 1
+                            elif pos == 1 and (r > umbral_alto or mh < -0.005):
+                                ganancia = (p - precio_entrada) if precio_entrada else 0
+                                if ganancia > 0: wins += 1
+                                cap = acc * p; acc = 0; pos = 0
+
+                            vals.append(cap + acc * p)
+
+                        if pos == 1: cap = acc * float(prices_test.iloc[-1])
+                        final = cap
+                        ret   = (final / capital - 1) * 100
+                        bnh   = (float(prices_test.iloc[-1]) / float(prices_test.iloc[0]) - 1) * 100
+
+                        s = pd.Series(vals)
+                        dr = s.pct_change().dropna()
+                        sharpe = float(dr.mean() / dr.std() * np.sqrt(252)) if dr.std() > 0 else 0
+                        maxdd  = float(((s / s.cummax()) - 1).min() * 100)
+                        calmar = abs(ret / maxdd) if maxdd != 0 else 0
+                        wr     = (wins / trades_n * 100) if trades_n > 0 else 0
+
+                        return {
+                            "retorno":  round(ret, 2),
+                            "bnh":      round(bnh, 2),
+                            "sharpe":   round(sharpe, 3),
+                            "calmar":   round(calmar, 3),
+                            "max_dd":   round(maxdd, 2),
+                            "win_rate": round(wr, 1),
+                            "n_trades": trades_n,
+                            "vals":     vals,
+                        }
+
+                    # Construir ventanas
+                    resultados_wf = []
+                    n    = len(close_wf)
+                    paso = wf_test
+                    start = wf_ventana
+
+                    while start + wf_test <= n:
+                        train = close_wf.iloc[start - wf_ventana : start]
+                        test  = close_wf.iloc[start : start + wf_test]
+                        res   = run_estrategia_ventana(train, test, wf_capital)
+                        res["fecha_inicio"] = str(test.index[0].date())
+                        res["fecha_fin"]    = str(test.index[-1].date())
+                        resultados_wf.append(res)
+                        start += paso
+
+                    df_wf_res = pd.DataFrame(resultados_wf)
+
+                    # ── Métricas globales ──
+                    wins_total  = (df_wf_res["retorno"] > df_wf_res["bnh"]).sum()
+                    total_v     = len(df_wf_res)
+                    pct_supera  = wins_total / total_v * 100 if total_v else 0
+                    sharpe_med  = df_wf_res["sharpe"].mean()
+                    calmar_med  = df_wf_res["calmar"].mean()
+                    wr_med      = df_wf_res["win_rate"].mean()
+                    ret_med     = df_wf_res["retorno"].mean()
+                    dd_med      = df_wf_res["max_dd"].mean()
+
+                    color_v = "#00ff9d" if pct_supera >= 60 else "#f59e0b" if pct_supera >= 45 else "#ff4466"
+                    veredicto = ("✅ ESTRATEGIA ROBUSTA" if pct_supera >= 60
+                                 else "⚠️ RESULTADOS MIXTOS" if pct_supera >= 45
+                                 else "❌ ESTRATEGIA DÉBIL")
+
+                    st.markdown(f"""
+                    <div style='background:{color_v}11;border:2px solid {color_v}44;
+                                border-radius:14px;padding:20px 24px;margin:16px 0'>
+                        <div style='font-size:22px;font-weight:800;color:{color_v};margin-bottom:12px'>
+                            {veredicto}
+                        </div>
+                        <div style='display:flex;gap:32px;flex-wrap:wrap;font-family:JetBrains Mono'>
+                            <div>
+                                <div style='font-size:10px;color:#444466;letter-spacing:2px'>SUPERA B&H</div>
+                                <div style='font-size:20px;color:{color_v};font-weight:700'>
+                                    {wins_total}/{total_v} ventanas ({pct_supera:.0f}%)
+                                </div>
+                            </div>
+                            <div>
+                                <div style='font-size:10px;color:#444466;letter-spacing:2px'>SHARPE MEDIO</div>
+                                <div style='font-size:20px;color:{"#00ff9d" if sharpe_med>1 else "#f59e0b" if sharpe_med>0 else "#ff4466"};font-weight:700'>
+                                    {sharpe_med:.3f}
+                                </div>
+                            </div>
+                            <div>
+                                <div style='font-size:10px;color:#444466;letter-spacing:2px'>CALMAR RATIO</div>
+                                <div style='font-size:20px;color:{"#00ff9d" if calmar_med>1 else "#f59e0b"};font-weight:700'>
+                                    {calmar_med:.3f}
+                                </div>
+                            </div>
+                            <div>
+                                <div style='font-size:10px;color:#444466;letter-spacing:2px'>WIN RATE REAL</div>
+                                <div style='font-size:20px;color:{"#00ff9d" if wr_med>55 else "#f59e0b" if wr_med>45 else "#ff4466"};font-weight:700'>
+                                    {wr_med:.1f}%
+                                </div>
+                            </div>
+                            <div>
+                                <div style='font-size:10px;color:#444466;letter-spacing:2px'>MAX DRAWDOWN</div>
+                                <div style='font-size:20px;color:{"#00ff9d" if abs(dd_med)<10 else "#f59e0b" if abs(dd_med)<20 else "#ff4466"};font-weight:700'>
+                                    {dd_med:.1f}%
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    # Gráfica retorno por ventana vs B&H
+                    fig_wf = go.Figure()
+                    fig_wf.add_trace(go.Bar(
+                        x=df_wf_res["fecha_inicio"],
+                        y=df_wf_res["retorno"],
+                        name="Estrategia RSI+MACD",
+                        marker_color=["#00ff9d" if r > b else "#ff4466"
+                                      for r, b in zip(df_wf_res["retorno"], df_wf_res["bnh"])],
+                        opacity=0.85,
+                    ))
+                    fig_wf.add_trace(go.Scatter(
+                        x=df_wf_res["fecha_inicio"],
+                        y=df_wf_res["bnh"],
+                        name="Buy & Hold",
+                        line=dict(color="#f59e0b", width=2, dash="dot"),
+                        mode="lines+markers",
+                    ))
+                    fig_wf.add_hline(y=0, line=dict(color="#2a2a44", width=1))
+                    fig_wf.update_layout(
+                        template="plotly_dark", paper_bgcolor="#0e0e1e", plot_bgcolor="#0e0e1e",
+                        font=dict(family="Syne", color="#e8e8f0"),
+                        title=f"Retorno por ventana de {wf_test} días — {wf_ticker}",
+                        height=320, margin=dict(l=16,r=16,t=48,b=16),
+                        xaxis=dict(showgrid=False, color="#444466"),
+                        yaxis=dict(gridcolor="#1c1c30", color="#444466", ticksuffix="%"),
+                        legend=dict(bgcolor="#0a0a16", font=dict(family="JetBrains Mono", size=11)),
+                        barmode="overlay",
+                    )
+                    st.plotly_chart(fig_wf, use_container_width=True)
+
+                    # Tabla detallada
+                    st.markdown("<div class='label-tag'>Detalle por ventana</div>", unsafe_allow_html=True)
+                    for _, row_wf in df_wf_res.iterrows():
+                        supera = row_wf["retorno"] > row_wf["bnh"]
+                        c = "#00ff9d" if supera else "#ff4466"
+                        st.markdown(f"""
+                        <div style='background:#0a0a16;border:1px solid {"#00ff9d33" if supera else "#ff446633"};
+                                    border-left:3px solid {c};border-radius:8px;
+                                    padding:10px 14px;margin-bottom:6px;
+                                    display:flex;gap:20px;flex-wrap:wrap;align-items:center;
+                                    font-family:JetBrains Mono;font-size:12px'>
+                            <span style='color:#666'>{row_wf["fecha_inicio"]} → {row_wf["fecha_fin"]}</span>
+                            <span style='color:{c};font-weight:700'>Estrategia: {row_wf["retorno"]:+.1f}%</span>
+                            <span style='color:#f59e0b'>B&H: {row_wf["bnh"]:+.1f}%</span>
+                            <span style='color:#888'>Sharpe: {row_wf["sharpe"]:.2f}</span>
+                            <span style='color:#888'>WinRate: {row_wf["win_rate"]:.0f}%</span>
+                            <span style='color:#888'>Trades: {row_wf["n_trades"]}</span>
+                            <span style='color:{"#ff4466" if row_wf["max_dd"]<-15 else "#f59e0b"}'>DD: {row_wf["max_dd"]:.1f}%</span>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+    # ─────────────────────────────────────────
+    #  TAB 2 — HMM ENSEMBLE
+    # ─────────────────────────────────────────
+    with tab2:
+        st.markdown("""
+        <div style='color:#888;font-size:13px;margin-bottom:16px'>
+        Entrena 3 HMMs independientes con ventanas históricas diferentes.
+        El régimen final se decide por votación ponderada. Más robusto que un solo HMM
+        porque reduce el sobreajuste a un período específico.
+        </div>
+        """, unsafe_allow_html=True)
+
+        col1, col2 = st.columns([2, 2])
+        ens_ticker = col1.text_input("Ticker", value=tickers_port[0] if tickers_port else "SPY", key="ens_t")
+        ens_period = col2.select_slider("Periodo", options=["1y","2y","3y","5y"], value="2y", key="ens_p")
+
+        if st.button("▶ Ejecutar HMM Ensemble", use_container_width=True, key="ens_run"):
+            with st.spinner("Entrenando ensemble de 3 HMMs…"):
+                serie_ens = get_historico(ens_ticker, ens_period)
+                if serie_ens is None or len(serie_ens) < 120:
+                    st.error("Datos insuficientes.")
+                else:
+                    # Tres HMMs con ventanas distintas
+                    ventanas = [
+                        ("Corto (6m)",  serie_ens.iloc[-126:]),
+                        ("Medio (1a)",  serie_ens.iloc[-252:] if len(serie_ens)>=252 else serie_ens),
+                        ("Largo (2a)",  serie_ens),
+                    ]
+                    resultados_ens = []
+                    for nombre_v, serie_v in ventanas:
+                        estados_v, fechas_v = hmm_regimen(serie_v)
+                        if estados_v is not None:
+                            resultados_ens.append((nombre_v, estados_v, fechas_v, serie_v))
+
+                    if not resultados_ens:
+                        st.error("No se pudo entrenar ningún HMM.")
+                    else:
+                        # Índice común a todos los HMMs
+                        idx_comun = resultados_ens[0][2]
+                        for _, _, fechas_v, _ in resultados_ens[1:]:
+                            idx_comun = idx_comun.intersection(fechas_v)
+
+                        # Votación ponderada: largo tiene más peso
+                        pesos = [0.25, 0.35, 0.40]
+                        votos = np.zeros((len(idx_comun), 3))  # prob por estado
+
+                        for (nombre_v, estados_v, fechas_v, _), peso in zip(resultados_ens, pesos):
+                            for j, fecha in enumerate(idx_comun):
+                                if fecha in fechas_v:
+                                    idx_f = list(fechas_v).index(fecha)
+                                    if idx_f < len(estados_v):
+                                        votos[j, estados_v[idx_f]] += peso
+
+                        estados_ensemble = np.argmax(votos, axis=1)
+                        confianza        = votos.max(axis=1)  # qué tan unánime fue la votación
+
+                        estado_actual  = int(estados_ensemble[-1])
+                        conf_actual    = float(confianza[-1])
+                        n_bull = (estados_ensemble == 2).sum()
+                        n_lat  = (estados_ensemble == 1).sum()
+                        n_bear = (estados_ensemble == 0).sum()
+                        total_e = len(estados_ensemble)
+
+                        # Acuerdo entre HMMs en el período reciente
+                        acuerdo_reciente = confianza[-20:].mean() if len(confianza) >= 20 else confianza.mean()
+
+                        clase_e = clase_regimen(estado_actual)
+                        color_e = color_regimen(estado_actual)
+                        conf_color = "#00ff9d" if conf_actual > 0.7 else "#f59e0b" if conf_actual > 0.5 else "#ff4466"
+
+                        st.markdown(f"""
+                        <div class='{clase_e}' style='margin:16px 0;display:flex;
+                                    justify-content:space-between;align-items:center'>
+                            <div>
+                                <div style='font-size:11px;letter-spacing:2px;
+                                            font-family:JetBrains Mono;opacity:0.7'>
+                                    RÉGIMEN ENSEMBLE — {ens_ticker}
+                                </div>
+                                <div style='font-size:26px;margin-top:4px'>
+                                    {nombre_regimen(estado_actual)}
+                                </div>
+                            </div>
+                            <div style='text-align:right'>
+                                <div style='font-size:10px;color:#444466;font-family:JetBrains Mono'>
+                                    CONFIANZA DEL ENSEMBLE
+                                </div>
+                                <div style='font-size:28px;font-weight:800;color:{conf_color}'>
+                                    {conf_actual*100:.0f}%
+                                </div>
+                                <div style='font-size:11px;color:#666;font-family:JetBrains Mono'>
+                                    acuerdo reciente: {acuerdo_reciente*100:.0f}%
+                                </div>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                        # Distribución
+                        c1, c2, c3 = st.columns(3)
+                        c1.metric("🐂 Alcista", f"{n_bull/total_e*100:.1f}%", f"{n_bull} días")
+                        c2.metric("↔️ Lateral",  f"{n_lat/total_e*100:.1f}%",  f"{n_lat} días")
+                        c3.metric("🐻 Bajista", f"{n_bear/total_e*100:.1f}%", f"{n_bear} días")
+
+                        # Gráfica precio + regímenes + confianza
+                        fig_ens = make_subplots(
+                            rows=3, cols=1, shared_xaxes=True,
+                            row_heights=[0.55, 0.25, 0.20],
+                            vertical_spacing=0.04,
+                            subplot_titles=[f"{ens_ticker} — Régimen Ensemble",
+                                            "Confianza del Ensemble", "Estado"]
+                        )
+                        precio_ens = serie_ens.reindex(idx_comun).values
+                        fig_ens.add_trace(go.Scatter(
+                            x=idx_comun, y=precio_ens, name="Precio",
+                            line=dict(color="#e8e8f0", width=1.5)
+                        ), row=1, col=1)
+
+                        # Sombreado por régimen
+                        for e, fill_c, lbl in [(2,"rgba(0,255,157,0.15)","Alcista"),
+                                               (1,"rgba(245,158,11,0.12)","Lateral"),
+                                               (0,"rgba(255,68,102,0.15)","Bajista")]:
+                            mask = estados_ensemble == e
+                            in_b = False; x0 = None
+                            for jj, mm in enumerate(mask):
+                                if mm and not in_b:
+                                    x0 = idx_comun[jj]; in_b = True
+                                elif not mm and in_b:
+                                    fig_ens.add_vrect(x0=x0, x1=idx_comun[jj-1],
+                                                     fillcolor=fill_c, line_width=0, row=1, col=1)
+                                    in_b = False
+                            if in_b and x0 is not None:
+                                fig_ens.add_vrect(x0=x0, x1=idx_comun[-1],
+                                                 fillcolor=fill_c, line_width=0, row=1, col=1)
+                            fig_ens.add_trace(go.Scatter(x=[None], y=[None], mode="markers",
+                                marker=dict(size=10, symbol="square",
+                                            color=fill_c.replace("0.15","1").replace("0.12","1")),
+                                name=lbl, showlegend=True), row=1, col=1)
+
+                        # Línea de confianza
+                        conf_colors = [color_regimen(e) for e in estados_ensemble]
+                        fig_ens.add_trace(go.Scatter(
+                            x=idx_comun, y=confianza * 100,
+                            name="Confianza", fill="tozeroy",
+                            line=dict(color="#3b82f6", width=1.5),
+                            fillcolor="rgba(59,130,246,0.1)",
+                        ), row=2, col=1)
+                        fig_ens.add_hline(y=70, line=dict(color="#00ff9d", dash="dash", width=1), row=2, col=1)
+                        fig_ens.add_hline(y=50, line=dict(color="#f59e0b", dash="dash", width=1), row=2, col=1)
+
+                        # Timeline estados
+                        fig_ens.add_trace(go.Scatter(
+                            x=idx_comun, y=estados_ensemble,
+                            mode="markers",
+                            marker=dict(color=conf_colors, size=3, symbol="square"),
+                            showlegend=False,
+                        ), row=3, col=1)
+                        fig_ens.update_yaxes(tickvals=[0,1,2], ticktext=["Bajista","Lateral","Alcista"], row=3, col=1)
+
+                        fig_ens.update_layout(
+                            template="plotly_dark", paper_bgcolor="#0e0e1e", plot_bgcolor="#0e0e1e",
+                            font=dict(family="Syne", color="#e8e8f0"), height=560,
+                            margin=dict(l=16,r=16,t=40,b=16),
+                            legend=dict(bgcolor="#0a0a16", font=dict(family="JetBrains Mono", size=11))
+                        )
+                        for rr in [1, 2, 3]:
+                            fig_ens.update_xaxes(gridcolor="#1c1c30", color="#444466", showgrid=False, row=rr, col=1)
+                            fig_ens.update_yaxes(gridcolor="#1c1c30", color="#444466", row=rr, col=1)
+                        st.plotly_chart(fig_ens, use_container_width=True)
+
+                        # Comparar HMMs individuales vs ensemble
+                        st.markdown("<div class='label-tag'>Comparación HMM individual vs Ensemble</div>", unsafe_allow_html=True)
+                        for nombre_v, estados_v, fechas_v, _ in resultados_ens:
+                            idx_v = idx_comun.intersection(fechas_v)
+                            if len(idx_v) == 0: continue
+                            e_v   = estados_v[-1] if len(estados_v) > 0 else 1
+                            color_v2 = color_regimen(int(e_v))
+                            st.markdown(f"""
+                            <div style='background:#0a0a16;border:1px solid #1c1c30;border-radius:8px;
+                                        padding:10px 16px;margin-bottom:6px;
+                                        display:flex;justify-content:space-between;
+                                        font-family:JetBrains Mono;font-size:13px'>
+                                <span style='color:#888'>{nombre_v}</span>
+                                <span style='color:{color_v2};font-weight:700'>
+                                    {nombre_regimen(int(e_v))}
+                                </span>
+                            </div>
+                            """, unsafe_allow_html=True)
+
+    # ─────────────────────────────────────────
+    #  TAB 3 — PARTICLE FILTER
+    # ─────────────────────────────────────────
+    with tab3:
+        st.markdown("""
+        <div style='color:#888;font-size:13px;margin-bottom:16px'>
+        El Particle Filter (filtro de partículas) es superior al Kalman para
+        señales no lineales. Mantiene múltiples hipótesis simultáneas del estado
+        real del mercado — cada "partícula" es un escenario posible.
+        </div>
+        """, unsafe_allow_html=True)
+
+        col1, col2 = st.columns([2, 2])
+        pf_ticker  = col1.text_input("Ticker", value=tickers_port[0] if tickers_port else "SPY", key="pf_t")
+        pf_n_part  = col2.selectbox("Número de partículas", [200, 500, 1000, 2000], index=1, key="pf_n")
+        pf_period  = st.select_slider("Periodo", options=["3mo","6mo","1y","2y"], value="1y", key="pf_p")
+
+        if st.button("▶ Ejecutar Particle Filter", use_container_width=True, key="pf_run"):
+            with st.spinner(f"Corriendo Particle Filter con {pf_n_part} partículas…"):
+                serie_pf = get_historico(pf_ticker, pf_period)
+                if serie_pf is None or len(serie_pf) < 30:
+                    st.error("Datos insuficientes.")
+                else:
+                    precios_pf = serie_pf.astype(float).values
+                    N = pf_n_part
+                    np.random.seed(42)
+
+                    # Estado: [precio_suavizado, velocidad, volatilidad_log]
+                    # Partículas: distribución inicial alrededor del primer precio
+                    particles = np.zeros((N, 3))
+                    particles[:, 0] = precios_pf[0] * (1 + np.random.normal(0, 0.01, N))
+                    particles[:, 1] = np.random.normal(0, 0.001, N)  # velocidad
+                    particles[:, 2] = np.random.normal(0.01, 0.005, N).clip(0.001, 0.1)  # vol
+
+                    weights    = np.ones(N) / N
+                    estimados  = []
+                    incertidumbre = []
+
+                    # Ruido del proceso
+                    Q_p = np.diag([0.001, 0.0001, 0.00001])
+                    # Ruido de observación
+                    R_obs = 0.005
+
+                    for precio_obs in precios_pf:
+                        # 1. Predicción: mover partículas según modelo
+                        noise = np.random.multivariate_normal([0, 0, 0], Q_p, N)
+                        particles[:, 1] += noise[:, 1]  # velocidad cambia
+                        particles[:, 0] += particles[:, 1] + noise[:, 0]  # precio cambia
+                        particles[:, 2] = np.abs(particles[:, 2] + noise[:, 2]).clip(0.001, 0.15)
+
+                        # 2. Actualización: peso según verosimilitud de la observación
+                        err = precio_obs - particles[:, 0]
+                        sigma_obs = particles[:, 2] * precio_obs  # vol relativa
+                        likelihood = np.exp(-0.5 * (err / sigma_obs) ** 2) / (sigma_obs * np.sqrt(2 * np.pi))
+                        likelihood = np.clip(likelihood, 1e-300, None)
+                        weights = weights * likelihood
+                        weights /= weights.sum() + 1e-300
+
+                        # 3. Estimación: media ponderada
+                        est = np.average(particles[:, 0], weights=weights)
+                        inc = np.sqrt(np.average((particles[:, 0] - est)**2, weights=weights))
+                        estimados.append(float(est))
+                        incertidumbre.append(float(inc))
+
+                        # 4. Resampling efectivo si pocos pesos dominan
+                        N_eff = 1.0 / (weights ** 2).sum()
+                        if N_eff < N * 0.5:
+                            indices = np.random.choice(N, size=N, p=weights)
+                            particles = particles[indices]
+                            weights = np.ones(N) / N
+
+                    estimados     = np.array(estimados)
+                    incertidumbre = np.array(incertidumbre)
+
+                    # Comparar con Kalman clásico
+                    kalman_est = []
+                    xhat_k, P_k, Q_k, R_k = precios_pf[0], 1.0, 1e-5, 0.01**2
+                    for pp in precios_pf:
+                        Pm_k = P_k + Q_k; K_k = Pm_k / (Pm_k + R_k)
+                        xhat_k = xhat_k + K_k * (pp - xhat_k); P_k = (1 - K_k) * Pm_k
+                        kalman_est.append(xhat_k)
+
+                    # Error cuadrático medio de cada filtro
+                    mse_pf = np.mean((precios_pf - estimados) ** 2)
+                    mse_k  = np.mean((precios_pf - np.array(kalman_est)) ** 2)
+                    mejora = (mse_k - mse_pf) / mse_k * 100
+
+                    # Señal actual
+                    precio_actual_pf = float(precios_pf[-1])
+                    est_actual       = float(estimados[-1])
+                    inc_actual       = float(incertidumbre[-1])
+                    diff_pct         = (precio_actual_pf - est_actual) / est_actual * 100
+
+                    señal_pf = "🚨 SOBRECOMPRADO" if diff_pct > 3 else \
+                               "🟢 OPORTUNIDAD"   if diff_pct < -3 else "⚪ NEUTRAL"
+                    color_pf = "#ff4466" if diff_pct > 3 else "#00ff9d" if diff_pct < -3 else "#888"
+
+                    # Cards de resultado
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("🎯 Precio estimado", f"${est_actual:,.2f}")
+                    c2.metric("📊 Precio actual",   f"${precio_actual_pf:,.2f}", f"{diff_pct:+.2f}%")
+                    c3.metric("📉 Incertidumbre",   f"±${inc_actual:,.2f}")
+                    c4.metric("⚡ Mejora vs Kalman", f"{mejora:+.1f}%")
+
+                    st.markdown(f"""
+                    <div style='background:{color_pf}11;border:1px solid {color_pf}44;
+                                border-left:4px solid {color_pf};border-radius:12px;
+                                padding:14px 20px;margin:12px 0'>
+                        <div style='font-size:18px;font-weight:800;color:{color_pf}'>{señal_pf}</div>
+                        <div style='font-family:JetBrains Mono;font-size:12px;color:#666;margin-top:4px'>
+                            Precio está {abs(diff_pct):.1f}% {"por encima" if diff_pct>0 else "por debajo"}
+                            de la estimación del Particle Filter
+                            &nbsp;|&nbsp; Banda de confianza: ${est_actual-inc_actual:,.2f} – ${est_actual+inc_actual:,.2f}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    # Gráfica
+                    fig_pf = go.Figure()
+                    banda_sup = estimados + incertidumbre * 2
+                    banda_inf = estimados - incertidumbre * 2
+                    fechas_pf = list(serie_pf.index)
+
+                    fig_pf.add_trace(go.Scatter(
+                        x=fechas_pf + fechas_pf[::-1],
+                        y=list(banda_sup) + list(banda_inf[::-1]),
+                        fill="toself", fillcolor="rgba(59,130,246,0.08)",
+                        line=dict(width=0), name="Banda ±2σ", showlegend=True,
+                    ))
+                    fig_pf.add_trace(go.Scatter(
+                        x=fechas_pf, y=precios_pf,
+                        name="Precio real", line=dict(color="#e8e8f0", width=1.5)
+                    ))
+                    fig_pf.add_trace(go.Scatter(
+                        x=fechas_pf, y=estimados,
+                        name=f"Particle Filter (MSE={mse_pf:.4f})",
+                        line=dict(color="#00ff9d", width=2)
+                    ))
+                    fig_pf.add_trace(go.Scatter(
+                        x=fechas_pf, y=kalman_est,
+                        name=f"Kalman clásico (MSE={mse_k:.4f})",
+                        line=dict(color="#f59e0b", width=1.5, dash="dot")
+                    ))
+                    fig_pf.update_layout(
+                        template="plotly_dark", paper_bgcolor="#0e0e1e", plot_bgcolor="#0e0e1e",
+                        font=dict(family="Syne", color="#e8e8f0"),
+                        title=f"{pf_ticker} — Particle Filter vs Kalman clásico ({pf_n_part} partículas)",
+                        height=400, margin=dict(l=16,r=16,t=48,b=16), hovermode="x unified",
+                        xaxis=dict(showgrid=False, color="#444466"),
+                        yaxis=dict(gridcolor="#1c1c30", color="#444466"),
+                        legend=dict(bgcolor="#0a0a16", font=dict(family="JetBrains Mono", size=11))
+                    )
+                    st.plotly_chart(fig_pf, use_container_width=True)
+
+    # ─────────────────────────────────────────
+    #  TAB 4 — KELLY CON CORRELACIONES
+    # ─────────────────────────────────────────
+    with tab4:
+        st.markdown("""
+        <div style='color:#888;font-size:13px;margin-bottom:16px'>
+        El Kelly simple asume que cada posición es independiente.
+        Pero AAPL y MSFT están correlacionadas — si una cae, la otra también.
+        El Kelly con correlaciones ajusta el sizing para que el riesgo real del portafolio
+        sea el que calculas, no el doble por tener activos correlacionados.
+        </div>
+        """, unsafe_allow_html=True)
+
+        capital_kelly = st.number_input("Capital total $", value=10000.0, step=500.0, key="kc_cap")
+        kelly_period  = st.select_slider("Periodo histórico", options=["6mo","1y","2y"], value="1y", key="kc_p")
+
+        tickers_kelly = tickers_port.copy()
+        extra_k = st.text_input("Agregar tickers extra (separados por coma)", placeholder="NVDA, META, GSPC", key="kc_e")
+        if extra_k.strip():
+            for tk in extra_k.split(","):
+                tk = tk.strip().upper()
+                if tk and tk not in tickers_kelly:
+                    tickers_kelly.append(tk)
+
+        if not tickers_kelly:
+            st.info("Agrega acciones a tu portafolio o escribe tickers arriba.")
+        elif st.button("▶ Calcular Kelly con Correlaciones", use_container_width=True, key="kc_run"):
+            with st.spinner("Calculando matriz de correlaciones y sizing óptimo…"):
+                series_dict = {}
+                for tk in tickers_kelly:
+                    s = get_historico(tk, kelly_period)
+                    if s is not None and len(s) > 30:
+                        series_dict[tk] = s
+
+                if len(series_dict) < 2:
+                    st.error("Necesitas al menos 2 activos con datos para calcular correlaciones.")
+                else:
+                    # Alinear series en índice común
+                    df_all = pd.DataFrame(series_dict)
+                    df_all = df_all.dropna()
+                    ret_df = df_all.pct_change().dropna()
+
+                    # Matriz de correlaciones
+                    corr_mat = ret_df.corr()
+
+                    # Kelly individual por activo
+                    kelly_ind = {}
+                    for tk in series_dict:
+                        r = ret_df[tk]
+                        wins = r[r>0]; losses = r[r<0]
+                        if len(wins) > 0 and len(losses) > 0:
+                            p = len(wins)/len(r)
+                            b = wins.mean() / abs(losses.mean()) if losses.mean() != 0 else 1
+                            k = max(0.0, min((b*p - (1-p)) / b, 0.5))
+                        else:
+                            k = 0.0
+                        kelly_ind[tk] = k
+
+                    # Ajuste por correlación: reducir Kelly según correlación promedio con los demás
+                    tickers_k = list(series_dict.keys())
+                    kelly_ajustado = {}
+                    for tk in tickers_k:
+                        corrs_otros = [abs(corr_mat.loc[tk, tk2])
+                                       for tk2 in tickers_k if tk2 != tk]
+                        corr_prom = np.mean(corrs_otros) if corrs_otros else 0
+                        # Factor de penalización: a mayor correlación con los demás, menor Kelly
+                        factor = 1 - (corr_prom * 0.5)
+                        kelly_ajustado[tk] = kelly_ind[tk] * factor
+
+                    # Normalizar para que la suma no supere 100%
+                    suma_k = sum(kelly_ajustado.values())
+                    if suma_k > 1.0:
+                        kelly_ajustado = {tk: v/suma_k for tk, v in kelly_ajustado.items()}
+
+                    # Heatmap de correlaciones
+                    st.markdown("<div class='label-tag'>Matriz de correlaciones</div>", unsafe_allow_html=True)
+                    fig_corr = go.Figure(go.Heatmap(
+                        z=corr_mat.values,
+                        x=corr_mat.columns.tolist(),
+                        y=corr_mat.index.tolist(),
+                        colorscale=[
+                            [0.0,  "#ff4466"],
+                            [0.5,  "#0e0e1e"],
+                            [1.0,  "#00ff9d"],
+                        ],
+                        zmid=0, zmin=-1, zmax=1,
+                        text=np.round(corr_mat.values, 2),
+                        texttemplate="%{text}",
+                        textfont=dict(size=11, family="JetBrains Mono"),
+                        hoverongaps=False,
+                    ))
+                    fig_corr.update_layout(
+                        template="plotly_dark", paper_bgcolor="#0e0e1e", plot_bgcolor="#0e0e1e",
+                        font=dict(family="Syne", color="#e8e8f0"),
+                        height=max(300, len(tickers_k) * 55 + 80),
+                        margin=dict(l=16,r=16,t=16,b=16),
+                    )
+                    st.plotly_chart(fig_corr, use_container_width=True)
+
+                    # Comparativa Kelly simple vs ajustado
+                    st.markdown("<div class='label-tag'>Kelly simple vs Kelly ajustado por correlación</div>", unsafe_allow_html=True)
+                    fig_kk = go.Figure()
+                    fig_kk.add_trace(go.Bar(
+                        x=tickers_k,
+                        y=[kelly_ind[tk]*100 for tk in tickers_k],
+                        name="Kelly simple", marker_color="#3b82f6", opacity=0.7,
+                    ))
+                    fig_kk.add_trace(go.Bar(
+                        x=tickers_k,
+                        y=[kelly_ajustado[tk]*100 for tk in tickers_k],
+                        name="Kelly ajustado (correlaciones)", marker_color="#00ff9d", opacity=0.9,
+                    ))
+                    fig_kk.update_layout(
+                        template="plotly_dark", paper_bgcolor="#0e0e1e", plot_bgcolor="#0e0e1e",
+                        font=dict(family="Syne", color="#e8e8f0"),
+                        barmode="group", height=300,
+                        margin=dict(l=16,r=16,t=16,b=16),
+                        xaxis=dict(showgrid=False, color="#444466"),
+                        yaxis=dict(gridcolor="#1c1c30", color="#444466", ticksuffix="%"),
+                        legend=dict(bgcolor="#0a0a16", font=dict(family="JetBrains Mono", size=11)),
+                    )
+                    st.plotly_chart(fig_kk, use_container_width=True)
+
+                    # Cards de asignación recomendada
+                    st.markdown("<div class='label-tag'>Asignación óptima recomendada</div>", unsafe_allow_html=True)
+                    total_asig = sum(kelly_ajustado.values())
+                    cols_k = st.columns(min(len(tickers_k), 4))
+                    for ci, tk in enumerate(sorted(tickers_k, key=lambda x: kelly_ajustado[x], reverse=True)):
+                        k_s = kelly_ind[tk]
+                        k_a = kelly_ajustado[tk]
+                        reduccion = (k_s - k_a) / k_s * 100 if k_s > 0 else 0
+                        dolar_rec = k_a * capital_kelly
+                        corrs_otros = [abs(corr_mat.loc[tk, tk2]) for tk2 in tickers_k if tk2 != tk]
+                        corr_p = np.mean(corrs_otros) if corrs_otros else 0
+
+                        color_k2 = "#00ff9d" if k_a > 0.15 else "#f59e0b" if k_a > 0.05 else "#666"
+                        with cols_k[ci % 4]:
+                            st.markdown(f"""
+                            <div style='background:#0e0e1e;border:1px solid #1c1c30;
+                                        border-left:3px solid {color_k2};border-radius:12px;
+                                        padding:14px;margin-bottom:10px'>
+                                <div style='font-weight:800;font-size:16px'>{tk}</div>
+                                <div style='font-family:JetBrains Mono;font-size:22px;
+                                            font-weight:700;color:{color_k2};margin:6px 0'>
+                                    {k_a*100:.1f}%
+                                </div>
+                                <div style='font-family:JetBrains Mono;font-size:13px;color:#e8e8f0'>
+                                    ${dolar_rec:,.0f}
+                                </div>
+                                <div style='margin-top:8px;padding-top:8px;border-top:1px solid #1c1c30;
+                                            font-size:11px;color:#666;font-family:JetBrains Mono'>
+                                    Simple: {k_s*100:.1f}% &nbsp;→&nbsp;
+                                    <span style='color:#f59e0b'>-{reduccion:.0f}% por correlación</span><br>
+                                    Corr. promedio: {corr_p:.2f}
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+
+                    st.markdown(f"""
+                    <div style='background:#f59e0b0e;border:1px solid #f59e0b33;border-radius:10px;
+                                padding:14px 18px;margin-top:8px;font-size:13px;color:#f59e0b'>
+                        ⚠️ <strong>Capital asignado total: {total_asig*100:.1f}% de ${capital_kelly:,.0f}</strong>
+                        = <strong>${total_asig*capital_kelly:,.0f}</strong> &nbsp;·&nbsp;
+                        El {(1-total_asig)*100:.1f}% restante (${(1-total_asig)*capital_kelly:,.0f})
+                        se mantiene en efectivo como colchón de riesgo.
+                    </div>
+                    """, unsafe_allow_html=True)
