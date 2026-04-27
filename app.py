@@ -900,6 +900,7 @@ with st.sidebar:
         "🔗  Pairs Trading":    "pairs",
         "⚖️  Kelly Sizing":     "kelly",
         "🧪  Lab Quant":        "lab",
+        "🎯  Motor Decisión":   "motor",
     }
     for label, key in vistas.items():
         active = st.session_state.vista == key
@@ -2789,3 +2790,541 @@ elif st.session_state.vista == "lab":
                         se mantiene en efectivo como colchón de riesgo.
                     </div>
                     """, unsafe_allow_html=True)
+
+# ═══════════════════════════════════════════════════════════
+#  🎯 MOTOR DE DECISIÓN UNIFICADO
+#  Integra todas las señales → probabilidad + tamaño óptimo
+# ═══════════════════════════════════════════════════════════
+elif st.session_state.vista == "motor":
+
+    st.markdown("""
+    <div style='padding:28px 0 8px'>
+        <div class='label-tag'>MOTOR DE DECISIÓN UNIFICADO</div>
+        <div style='font-size:28px;font-weight:800;letter-spacing:-0.5px'>🎯 Sistema Cuantitativo Completo</div>
+        <div style='color:#666;font-size:13px;margin-top:6px'>
+            Kalman · HMM Ensemble · Particle Filter · Técnico · Fundamental · Kelly · VaR · Monte Carlo
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ─── Funciones del motor ───────────────────────────────
+
+    def señal_kalman(serie):
+        """Retorna score [-1,1] del filtro Kalman sobre tendencia"""
+        precios = serie.astype(float).values
+        xhat, P, Q, R = precios[0], 1.0, 1e-5, 0.01**2
+        for p in precios:
+            Pm = P+Q; K = Pm/(Pm+R); xhat = xhat+K*(p-xhat); P=(1-K)*Pm
+        diff_pct = (precios[-1] - xhat) / xhat * 100
+        # Score: positivo = precio por encima de tendencia (posible techo)
+        # negativo = precio por debajo de tendencia (posible piso)
+        score = np.clip(diff_pct / 5.0, -1.0, 1.0)
+        return float(-score), float(xhat), float(precios[-1])  # invertido: techo = vender
+
+    def señal_hmm_ensemble(serie):
+        """Retorna score [-1,1] del HMM ensemble y confianza"""
+        ventanas = [serie.iloc[-126:], serie.iloc[-252:] if len(serie)>=252 else serie, serie]
+        pesos_v  = [0.25, 0.35, 0.40]
+        votos_e  = None
+        n_hmms   = 0
+        for sv, peso in zip(ventanas, pesos_v):
+            estados_v, fechas_v = hmm_regimen(sv)
+            if estados_v is None: continue
+            if votos_e is None:
+                votos_e = np.zeros(3)
+            votos_e[int(estados_v[-1])] += peso
+            n_hmms += 1
+        if votos_e is None: return 0.0, 0.0
+        estado_f    = int(np.argmax(votos_e))
+        confianza_f = float(votos_e[estado_f])
+        # 0=bajista→-1, 1=lateral→0, 2=alcista→+1
+        score_hmm = (estado_f - 1.0) * confianza_f
+        return float(score_hmm), float(confianza_f)
+
+    def señal_particle_filter(serie, N=300):
+        """Score del Particle Filter: distancia normalizada precio vs estimado"""
+        precios_v = serie.astype(float).values
+        particles = np.zeros((N, 2))
+        particles[:,0] = precios_v[0]*(1+np.random.normal(0,0.01,N))
+        particles[:,1] = np.random.normal(0,0.001,N)
+        weights = np.ones(N)/N
+        Q_p = np.diag([0.002, 0.0001]); R_p = 0.005
+        for pp in precios_v:
+            noise = np.random.multivariate_normal([0,0], Q_p, N)
+            particles[:,1] += noise[:,1]
+            particles[:,0] += particles[:,1] + noise[:,0]
+            err  = pp - particles[:,0]
+            sigma_p = max(pp*0.01, 0.001)
+            lk   = np.exp(-0.5*(err/sigma_p)**2)/(sigma_p*np.sqrt(2*np.pi))+1e-300
+            weights = weights*lk; weights /= weights.sum()+1e-300
+            if 1.0/(weights**2).sum() < N*0.5:
+                idx = np.random.choice(N, N, p=weights)
+                particles = particles[idx]; weights = np.ones(N)/N
+        est = float(np.average(particles[:,0], weights=weights))
+        diff_pct = (precios_v[-1] - est) / est * 100
+        # Precio muy por encima del estimado = sobrecomprado = señal venta
+        score_pf = float(np.clip(-diff_pct/3.0, -1.0, 1.0))
+        return score_pf, est
+
+    def señal_tecnica(serie):
+        """Score técnico combinado RSI+MACD+BB normalizado a [-1,1]"""
+        close = serie.astype(float)
+        rsi = calcular_rsi(close)
+        _, _, hist = calcular_macd(close)
+        bb_up, _, bb_lo = calcular_bollinger(close)
+        rsi_v  = float(rsi.iloc[-1])  if not np.isnan(rsi.iloc[-1])  else 50
+        hist_v = float(hist.iloc[-1]) if not np.isnan(hist.iloc[-1]) else 0
+        p      = float(close.iloc[-1])
+        bb_u   = float(bb_up.iloc[-1]) if not np.isnan(bb_up.iloc[-1]) else p*1.02
+        bb_l   = float(bb_lo.iloc[-1]) if not np.isnan(bb_lo.iloc[-1]) else p*0.98
+        score = 0.0
+        score += (50 - rsi_v) / 50.0 * 0.4        # RSI: <50 = alcista
+        score += np.sign(hist_v) * 0.3             # MACD: positivo = alcista
+        if p < bb_l:   score += 0.3                # BB: bajo banda = alcista
+        elif p > bb_u: score -= 0.3                # BB: sobre banda = bajista
+        return float(np.clip(score, -1.0, 1.0)), rsi_v, hist_v
+
+    def señal_fundamental(ticker):
+        """Score fundamental normalizado a [-1,1] basado en métricas clave"""
+        fd = get_fundamentales(ticker)
+        if not fd: return 0.0
+        score = 0.0; n = 0
+        # P/E: <15 bueno, >30 malo
+        if fd["pe_ratio"]:
+            score += np.clip((20-fd["pe_ratio"])/20.0, -1,1)*0.25; n+=1
+        # ROE: >15% bueno
+        if fd["roe"]:
+            score += np.clip((fd["roe"]-0.05)/0.15, -1,1)*0.25; n+=1
+        # Margen neto: >10% bueno
+        if fd["margen_neto"]:
+            score += np.clip((fd["margen_neto"]-0.03)/0.12, -1,1)*0.2; n+=1
+        # Crecimiento revenue: >10% bueno
+        if fd["rev_growth"]:
+            score += np.clip(fd["rev_growth"]/0.2, -1,1)*0.15; n+=1
+        # Deuda/equity: <80 bueno
+        if fd["debt_equity"]:
+            score += np.clip((80-fd["debt_equity"])/80.0, -1,1)*0.15; n+=1
+        return float(np.clip(score/max(n,1)*5, -1.0, 1.0)) if n>0 else 0.0
+
+    def calcular_var_es(serie, confianza=0.95, horizonte=1):
+        """Value at Risk y Expected Shortfall"""
+        ret = serie.pct_change().dropna().astype(float)
+        var = float(np.percentile(ret, (1-confianza)*100))
+        es  = float(ret[ret <= var].mean()) if len(ret[ret<=var])>0 else var
+        return var*np.sqrt(horizonte), es*np.sqrt(horizonte)
+
+    def montecarlo_portfolio(serie, capital, n_sim=1000, horizonte=30):
+        """Monte Carlo: distribución de escenarios futuros"""
+        ret = serie.pct_change().dropna().astype(float)
+        mu  = float(ret.mean())
+        sig = float(ret.std())
+        precio_actual = float(serie.iloc[-1])
+        sims = np.zeros((n_sim, horizonte))
+        for i in range(n_sim):
+            r = np.random.normal(mu, sig, horizonte)
+            sims[i] = precio_actual * np.cumprod(1+r)
+        valores_finales = sims[:,-1] * (capital / precio_actual)
+        return sims, valores_finales, precio_actual
+
+    def motor_decision_unificado(scores_dict, pesos_config, capital, kelly_k, var_1d, regimen):
+        """
+        Combina scores → probabilidad → tamaño de posición ajustado por riesgo
+        scores_dict: {señal: score entre -1 y +1}
+        pesos_config: {señal: peso}
+        """
+        # Score ponderado total
+        score_total = sum(scores_dict[k]*pesos_config.get(k,0) for k in scores_dict
+                          if k in pesos_config)
+        suma_pesos  = sum(pesos_config.get(k,0) for k in scores_dict if k in pesos_config)
+        score_norm  = score_total / suma_pesos if suma_pesos > 0 else 0.0
+
+        # Convertir a probabilidad via sigmoide
+        prob_compra = 1 / (1 + np.exp(-score_norm * 4))
+
+        # Zona de decisión
+        if prob_compra >= 0.70:   decision, color_d = "🟢 COMPRAR",  "#00ff9d"
+        elif prob_compra >= 0.60: decision, color_d = "🟡 ACUMULAR", "#f59e0b"
+        elif prob_compra <= 0.30: decision, color_d = "🔴 VENDER",   "#ff4466"
+        elif prob_compra <= 0.40: decision, color_d = "🟠 REDUCIR",  "#f97316"
+        else:                     decision, color_d = "⚪ NEUTRAL",   "#888"
+
+        # Position sizing ajustado por régimen
+        factor_regimen = {2: 1.0, 1: 0.6, 0: 0.3}.get(regimen, 0.6)
+        kelly_regime   = kelly_k * factor_regimen
+
+        # Ajuste por VaR: si el VaR diario > 3%, reducir posición
+        var_factor = min(1.0, 0.03 / abs(var_1d)) if abs(var_1d) > 0.001 else 1.0
+        kelly_final = min(kelly_regime * var_factor, 0.40)
+
+        capital_rec = capital * kelly_final * max(0.0, (prob_compra - 0.5) * 2)
+
+        return {
+            "score":       float(score_norm),
+            "prob":        float(prob_compra),
+            "decision":    decision,
+            "color":       color_d,
+            "kelly_adj":   float(kelly_final),
+            "capital_rec": float(capital_rec),
+            "factor_reg":  float(factor_regimen),
+            "var_factor":  float(var_factor),
+        }
+
+    # ─── UI del Motor ──────────────────────────────────────
+
+    port = st.session_state.portfolio.reset_index(drop=True)
+    tickers_port_m = port["Ticker"].tolist() if not port.empty else []
+
+    col1, col2, col3 = st.columns([2, 2, 1])
+    motor_ticker  = col1.text_input("Ticker a analizar", placeholder="AAPL, TSLA, GMEXICO.MX…", key="mot_t")
+    motor_port_t  = col2.selectbox("O desde portafolio", [""] + tickers_port_m, key="mot_p")
+    motor_capital = col3.number_input("Capital $", value=10000.0, step=500.0, key="mot_c")
+    motor_ticker  = motor_ticker.upper().strip() or motor_port_t
+
+    # Configuración de pesos
+    with st.expander("⚙️ Configurar pesos de cada señal"):
+        st.markdown("<div style='font-size:12px;color:#666;margin-bottom:8px'>"
+                    "Ajusta cuánto peso tiene cada fuente de señal en la decisión final.</div>",
+                    unsafe_allow_html=True)
+        cw1, cw2, cw3, cw4, cw5 = st.columns(5)
+        w_kalman = cw1.slider("Kalman",      0.0, 2.0, 1.0, 0.1, key="w_k")
+        w_hmm    = cw2.slider("HMM Ens.",    0.0, 2.0, 1.5, 0.1, key="w_h")
+        w_pf     = cw3.slider("Part.Filter", 0.0, 2.0, 1.0, 0.1, key="w_pf")
+        w_tec    = cw4.slider("Técnico",     0.0, 2.0, 1.2, 0.1, key="w_t")
+        w_fund   = cw5.slider("Fundamental", 0.0, 2.0, 0.8, 0.1, key="w_f")
+        pesos_conf = {
+            "kalman": w_kalman, "hmm": w_hmm, "particle": w_pf,
+            "tecnico": w_tec,   "fundamental": w_fund,
+        }
+
+    if not motor_ticker:
+        st.markdown("""
+        <div style='background:#0e0e1e;border:1px solid #1c1c30;border-radius:14px;
+                    padding:48px;text-align:center;margin-top:20px'>
+            <div style='font-size:36px'>🎯</div>
+            <div style='font-size:16px;font-weight:700;margin-top:12px'>
+                Escribe o selecciona un ticker para analizar
+            </div>
+            <div style='color:#444466;font-size:13px;margin-top:8px'>
+                El motor ejecuta todos los modelos simultáneamente y produce<br>
+                una probabilidad unificada + tamaño de posición óptimo
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    else:
+        with st.spinner(f"Ejecutando motor completo para {motor_ticker}…"):
+            t_start = __import__('time').time()
+
+            serie_m = get_historico(motor_ticker, "2y")
+            if serie_m is None:
+                serie_m = get_historico(motor_ticker+".MX", "2y")
+                if serie_m: motor_ticker += ".MX"
+
+            if serie_m is None or len(serie_m) < 60:
+                st.error(f"No se pudo obtener datos para {motor_ticker}.")
+            else:
+                np.random.seed(42)
+                errores = []
+
+                # ── Ejecutar todas las señales ──
+                try:    s_kal, kalman_est, precio_act = señal_kalman(serie_m)
+                except: s_kal, kalman_est, precio_act = 0.0, 0.0, float(serie_m.iloc[-1]); errores.append("Kalman")
+
+                try:    s_hmm, conf_hmm = señal_hmm_ensemble(serie_m)
+                except: s_hmm, conf_hmm = 0.0, 0.0; errores.append("HMM")
+
+                try:    s_pf, pf_est = señal_particle_filter(serie_m.iloc[-252:] if len(serie_m)>=252 else serie_m, N=300)
+                except: s_pf, pf_est = 0.0, float(serie_m.iloc[-1]); errores.append("Particle Filter")
+
+                try:    s_tec, rsi_v, macd_v = señal_tecnica(serie_m)
+                except: s_tec, rsi_v, macd_v = 0.0, 50.0, 0.0; errores.append("Técnico")
+
+                try:    s_fund = señal_fundamental(motor_ticker)
+                except: s_fund = 0.0; errores.append("Fundamental")
+
+                try:    var_1d, es_1d = calcular_var_es(serie_m)
+                except: var_1d, es_1d = -0.02, -0.03; errores.append("VaR")
+
+                # Régimen HMM para ajuste de posición
+                try:
+                    estados_m, _ = hmm_regimen(serie_m.iloc[-252:] if len(serie_m)>=252 else serie_m)
+                    regimen_actual = int(estados_m[-1]) if estados_m is not None else 1
+                except:
+                    regimen_actual = 1
+
+                # Kelly básico
+                ret_m = serie_m.pct_change().dropna().astype(float)
+                wins_m = ret_m[ret_m>0]; losses_m = ret_m[ret_m<0]
+                if len(wins_m)>0 and len(losses_m)>0:
+                    p_m = len(wins_m)/len(ret_m)
+                    b_m = wins_m.mean()/abs(losses_m.mean()) if losses_m.mean()!=0 else 1
+                    kelly_base = max(0.0, min((b_m*p_m-(1-p_m))/b_m, 0.5))
+                else:
+                    kelly_base = 0.1
+
+                scores_input = {
+                    "kalman": s_kal, "hmm": s_hmm, "particle": s_pf,
+                    "tecnico": s_tec, "fundamental": s_fund,
+                }
+
+                resultado = motor_decision_unificado(
+                    scores_input, pesos_conf, motor_capital,
+                    kelly_base, var_1d, regimen_actual
+                )
+                t_elapsed = __import__('time').time() - t_start
+
+                # ════════════════════════════════════
+                #  PANEL PRINCIPAL — Decisión
+                # ════════════════════════════════════
+                prob_pct  = resultado["prob"] * 100
+                color_dec = resultado["color"]
+                barra_prob = int(prob_pct)
+
+                st.markdown(f"""
+                <div style='background:{color_dec}0d;border:2px solid {color_dec}44;
+                            border-radius:18px;padding:28px 32px;margin:16px 0'>
+                    <div style='display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:20px'>
+                        <div>
+                            <div style='font-size:11px;letter-spacing:3px;color:#444466;
+                                        font-family:JetBrains Mono;text-transform:uppercase;
+                                        margin-bottom:8px'>DECISIÓN — {motor_ticker}</div>
+                            <div style='font-size:42px;font-weight:800;color:{color_dec};
+                                        letter-spacing:-1px;line-height:1'>
+                                {resultado["decision"]}
+                            </div>
+                            <div style='margin-top:16px;background:#ffffff0a;border-radius:8px;
+                                        height:12px;overflow:hidden;width:300px'>
+                                <div style='width:{barra_prob}%;height:100%;
+                                            background:linear-gradient(90deg,#ff4466,#f59e0b,#00ff9d);
+                                            border-radius:8px;transition:width 0.5s'></div>
+                            </div>
+                            <div style='font-family:JetBrains Mono;font-size:11px;
+                                        color:#666;margin-top:4px;display:flex;justify-content:space-between;width:300px'>
+                                <span>VENDER 0%</span><span>NEUTRAL 50%</span><span>COMPRAR 100%</span>
+                            </div>
+                        </div>
+                        <div style='text-align:right'>
+                            <div style='font-size:11px;color:#444466;font-family:JetBrains Mono;
+                                        letter-spacing:2px;margin-bottom:4px'>PROBABILIDAD</div>
+                            <div style='font-size:52px;font-weight:800;color:{color_dec};
+                                        font-family:JetBrains Mono;line-height:1'>
+                                {prob_pct:.1f}%
+                            </div>
+                            <div style='font-size:12px;color:#666;margin-top:4px;font-family:JetBrains Mono'>
+                                Score unificado: {resultado["score"]:+.3f}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                # ── Capital recomendado ──
+                sim_color = "#00ff9d" if resultado["capital_rec"] > 0 else "#888"
+                c1,c2,c3,c4 = st.columns(4)
+                c1.metric("💰 Capital recomendado", f"${resultado['capital_rec']:,.0f}",
+                          f"{resultado['kelly_adj']*100:.1f}% del portafolio")
+                c2.metric("📉 VaR diario (95%)",    f"{var_1d*100:.2f}%",
+                          f"ES: {es_1d*100:.2f}%")
+                c3.metric(f"🧬 Régimen {nombre_regimen(regimen_actual)}",
+                          f"Factor {resultado['factor_reg']:.0%}")
+                c4.metric("⚡ Tiempo análisis", f"{t_elapsed:.1f}s",
+                          f"{'⚠️ errores' if errores else '✅ completo'}")
+
+                # ════════════════════════════════════
+                #  DESGLOSE DE SEÑALES
+                # ════════════════════════════════════
+                st.markdown("<div class='label-tag' style='margin-top:16px'>Desglose de señales</div>",
+                            unsafe_allow_html=True)
+
+                señales_info = [
+                    ("🌊 Kalman Filter",    s_kal,  w_kalman, f"Tendencia: ${kalman_est:,.2f} | Precio: ${precio_act:,.2f}"),
+                    ("🧬 HMM Ensemble",     s_hmm,  w_hmm,   f"Régimen: {nombre_regimen(regimen_actual)} | Confianza: {conf_hmm*100:.0f}%"),
+                    ("🌀 Particle Filter",  s_pf,   w_pf,    f"Estimado: ${pf_est:,.2f} | Precio: ${precio_act:,.2f}"),
+                    ("🔬 Análisis Técnico", s_tec,  w_tec,   f"RSI: {rsi_v:.1f} | MACD hist: {macd_v:.4f}"),
+                    ("📋 Fundamental",      s_fund, w_fund,  f"Score fundamental: {s_fund:+.3f}"),
+                ]
+
+                for nombre_s, score_s, peso_s, detalle_s in señales_info:
+                    barra_s    = int((score_s + 1) / 2 * 100)  # 0-100
+                    color_s    = "#00ff9d" if score_s > 0.2 else "#ff4466" if score_s < -0.2 else "#f59e0b"
+                    contrib    = score_s * peso_s
+                    is_error_s = any(e.lower() in nombre_s.lower() for e in errores)
+
+                    st.markdown(f"""
+                    <div style='background:#0a0a16;border:1px solid #1c1c30;border-radius:10px;
+                                padding:12px 16px;margin-bottom:8px'>
+                        <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px'>
+                            <div>
+                                <span style='font-weight:700;font-size:14px'>{nombre_s}</span>
+                                {"<span style='color:#ff4466;font-size:10px;margin-left:8px;font-family:JetBrains Mono'>ERROR</span>" if is_error_s else ""}
+                                <div style='font-size:11px;color:#666;font-family:JetBrains Mono;margin-top:2px'>
+                                    {detalle_s}
+                                </div>
+                            </div>
+                            <div style='text-align:right'>
+                                <div style='font-family:JetBrains Mono;font-size:18px;
+                                            font-weight:700;color:{color_s}'>{score_s:+.3f}</div>
+                                <div style='font-size:10px;color:#444466;font-family:JetBrains Mono'>
+                                    peso: {peso_s:.1f} · contrib: {contrib:+.3f}
+                                </div>
+                            </div>
+                        </div>
+                        <div style='background:#ffffff0a;border-radius:4px;height:6px;overflow:hidden;position:relative'>
+                            <div style='position:absolute;left:50%;top:0;width:1px;height:100%;background:#2a2a44'></div>
+                            <div style='width:{barra_s}%;height:100%;background:{color_s};border-radius:4px'></div>
+                        </div>
+                        <div style='display:flex;justify-content:space-between;
+                                    font-family:JetBrains Mono;font-size:9px;color:#333;margin-top:2px'>
+                            <span>BAJISTA -1</span><span>NEUTRAL 0</span><span>ALCISTA +1</span>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                # ════════════════════════════════════
+                #  MONTE CARLO
+                # ════════════════════════════════════
+                st.markdown("<div class='label-tag' style='margin-top:16px'>Monte Carlo — 1000 escenarios (30 días)</div>",
+                            unsafe_allow_html=True)
+
+                with st.spinner("Simulando 1000 escenarios…"):
+                    sims_mc, vals_finales, p_act_mc = montecarlo_portfolio(
+                        serie_m, motor_capital, n_sim=1000, horizonte=30
+                    )
+
+                p5   = float(np.percentile(vals_finales, 5))
+                p25  = float(np.percentile(vals_finales, 25))
+                p50  = float(np.percentile(vals_finales, 50))
+                p75  = float(np.percentile(vals_finales, 75))
+                p95  = float(np.percentile(vals_finales, 95))
+                prob_ganancia = float((vals_finales > motor_capital).mean() * 100)
+
+                c1,c2,c3,c4,c5 = st.columns(5)
+                c1.metric("😱 Peor 5%",   f"${p5:,.0f}",  f"{(p5/motor_capital-1)*100:+.1f}%")
+                c2.metric("📉 P25",        f"${p25:,.0f}", f"{(p25/motor_capital-1)*100:+.1f}%")
+                c3.metric("📊 Mediana",    f"${p50:,.0f}", f"{(p50/motor_capital-1)*100:+.1f}%")
+                c4.metric("📈 P75",        f"${p75:,.0f}", f"{(p75/motor_capital-1)*100:+.1f}%")
+                c5.metric("🚀 Mejor 5%",   f"${p95:,.0f}", f"{(p95/motor_capital-1)*100:+.1f}%")
+
+                # Gráfica Monte Carlo
+                fig_mc = go.Figure()
+
+                # Muestra 200 trayectorias individuales
+                fechas_mc = pd.date_range(start=serie_m.index[-1], periods=31, freq='B')[1:]
+                for i in range(0, min(200, len(sims_mc)), 1):
+                    vals_i = sims_mc[i] * (motor_capital / p_act_mc)
+                    color_tr = "rgba(0,255,157,0.04)" if vals_i[-1] > motor_capital \
+                               else "rgba(255,68,102,0.04)"
+                    fig_mc.add_trace(go.Scatter(
+                        x=fechas_mc, y=vals_i,
+                        line=dict(width=0.5, color=color_tr),
+                        showlegend=False, hoverinfo="skip",
+                    ))
+
+                # Bandas de percentil
+                p5_ts  = np.percentile(sims_mc, 5, axis=0)  * (motor_capital/p_act_mc)
+                p95_ts = np.percentile(sims_mc, 95, axis=0) * (motor_capital/p_act_mc)
+                p50_ts = np.percentile(sims_mc, 50, axis=0) * (motor_capital/p_act_mc)
+
+                fig_mc.add_trace(go.Scatter(
+                    x=list(fechas_mc)+list(fechas_mc[::-1]),
+                    y=list(p95_ts)+list(p5_ts[::-1]),
+                    fill="toself", fillcolor="rgba(59,130,246,0.12)",
+                    line=dict(width=0), name="Banda 5%-95%",
+                ))
+                fig_mc.add_trace(go.Scatter(
+                    x=fechas_mc, y=p50_ts,
+                    name="Mediana", line=dict(color="#3b82f6", width=2.5)
+                ))
+                fig_mc.add_hline(
+                    y=motor_capital,
+                    line=dict(color="#f59e0b", dash="dash", width=1.5),
+                    annotation_text=f"Capital inicial ${motor_capital:,.0f}",
+                    annotation_font=dict(color="#f59e0b", size=11),
+                )
+
+                color_prob = "#00ff9d" if prob_ganancia>60 else "#f59e0b" if prob_ganancia>45 else "#ff4466"
+                fig_mc.update_layout(
+                    template="plotly_dark", paper_bgcolor="#0e0e1e", plot_bgcolor="#0e0e1e",
+                    font=dict(family="Syne", color="#e8e8f0"),
+                    title=f"Monte Carlo 1000 sims · {motor_ticker} · Probabilidad de ganancia: "
+                          f"<span style='color:{color_prob}'>{prob_ganancia:.0f}%</span>",
+                    height=400, margin=dict(l=16,r=16,t=56,b=16),
+                    xaxis=dict(showgrid=False, color="#444466"),
+                    yaxis=dict(gridcolor="#1c1c30", color="#444466", tickprefix="$"),
+                    legend=dict(bgcolor="#0a0a16", font=dict(family="JetBrains Mono", size=11)),
+                    hovermode="x unified",
+                )
+                st.plotly_chart(fig_mc, use_container_width=True)
+
+                # ════════════════════════════════════
+                #  GESTIÓN DE RIESGO PROFESIONAL
+                # ════════════════════════════════════
+                st.markdown("<div class='label-tag' style='margin-top:8px'>Gestión de riesgo — Stop Loss & Take Profit adaptativos</div>",
+                            unsafe_allow_html=True)
+
+                # Calcular stops según régimen y volatilidad
+                vol_30d    = float(serie_m.pct_change().dropna().iloc[-30:].std()) if len(serie_m)>30 else 0.02
+                stop_mult  = {2: 1.5, 1: 2.0, 0: 3.0}[regimen_actual]   # más amplio en bajista
+                tp_mult    = {2: 3.0, 1: 2.0, 0: 1.5}[regimen_actual]   # más conservador en bajista
+
+                stop_loss_pct  = vol_30d * stop_mult * np.sqrt(5)  # 1 semana
+                take_profit_pct= vol_30d * tp_mult   * np.sqrt(5)
+
+                stop_precio    = precio_act * (1 - stop_loss_pct)
+                tp_precio      = precio_act * (1 + take_profit_pct)
+                rr_ratio       = take_profit_pct / stop_loss_pct if stop_loss_pct > 0 else 0
+
+                # Drawdown máximo del portafolio
+                if not port.empty:
+                    dd_warning = resultado["capital_rec"] / motor_capital > 0.15
+                else:
+                    dd_warning = False
+
+                c1,c2,c3,c4 = st.columns(4)
+                c1.metric("🛑 Stop Loss",      f"${stop_precio:,.2f}", f"-{stop_loss_pct*100:.1f}%")
+                c2.metric("🎯 Take Profit",    f"${tp_precio:,.2f}",   f"+{take_profit_pct*100:.1f}%")
+                c3.metric("⚖️ Ratio R/R",       f"{rr_ratio:.2f}x",
+                          "✅ Favorable" if rr_ratio >= 2 else "⚠️ Revisar")
+                c4.metric("🌊 Vol. 30d",        f"{vol_30d*100:.2f}%/día",
+                          f"Régimen: {nombre_regimen(regimen_actual)}")
+
+                # Límite de drawdown del portafolio
+                st.markdown(f"""
+                <div style='background:{"#ff446611" if dd_warning else "#0e0e1e"};
+                            border:1px solid {"#ff444644" if dd_warning else "#1c1c30"};
+                            border-left:4px solid {"#ff4466" if dd_warning else "#00ff9d"};
+                            border-radius:10px;padding:14px 18px;margin-top:8px'>
+                    <div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px'>
+                        <div>
+                            <div style='font-weight:700;font-size:14px'>
+                                {"⚠️ Exposición alta — considera reducir posición" if dd_warning else "✅ Exposición dentro del límite de riesgo"}
+                            </div>
+                            <div style='font-size:12px;color:#888;font-family:JetBrains Mono;margin-top:4px'>
+                                Capital recomendado: ${resultado["capital_rec"]:,.0f}
+                                ({resultado["kelly_adj"]*100:.1f}% del total)
+                                &nbsp;·&nbsp; VaR diario: {var_1d*100:.2f}%
+                                &nbsp;·&nbsp; Expected Shortfall: {es_1d*100:.2f}%
+                            </div>
+                        </div>
+                        <div style='font-family:JetBrains Mono;font-size:22px;
+                                    font-weight:700;color:{resultado["color"]}'>
+                            {resultado["prob"]*100:.1f}% prob.
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                # ── Audio TTS del motor ──
+                texto_motor = (
+                    f"Motor de decisión para {motor_ticker}. "
+                    f"Decisión: {resultado['decision'].split(' ',1)[1] if ' ' in resultado['decision'] else resultado['decision']}. "
+                    f"Probabilidad de compra: {prob_pct:.0f} por ciento. "
+                    f"Régimen de mercado actual: {nombre_regimen(regimen_actual)}. "
+                    f"Capital recomendado: {resultado['kelly_adj']*100:.0f} por ciento del portafolio, "
+                    f"equivalente a {resultado['capital_rec']:,.0f} dólares. "
+                    f"Stop loss en {stop_loss_pct*100:.1f} por ciento. "
+                    f"Take profit en {take_profit_pct*100:.1f} por ciento. "
+                    f"Ratio riesgo-recompensa: {rr_ratio:.1f}. "
+                    f"Probabilidad de ganancia según Monte Carlo: {prob_ganancia:.0f} por ciento en 30 días."
+                )
+                st.components.v1.html(audio_tts_html(texto_motor), height=60)
