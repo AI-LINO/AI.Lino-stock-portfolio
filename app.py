@@ -2981,21 +2981,299 @@ elif st.session_state.vista == "motor":
     motor_capital = col3.number_input("Capital $", value=10000.0, step=500.0, key="mot_c")
     motor_ticker  = motor_ticker.upper().strip() or motor_port_t
 
-    # Configuración de pesos
-    with st.expander("⚙️ Configurar pesos de cada señal"):
-        st.markdown("<div style='font-size:12px;color:#666;margin-bottom:8px'>"
-                    "Ajusta cuánto peso tiene cada fuente de señal en la decisión final.</div>",
-                    unsafe_allow_html=True)
-        cw1, cw2, cw3, cw4, cw5 = st.columns(5)
-        w_kalman = cw1.slider("Kalman",      0.0, 2.0, 1.0, 0.1, key="w_k")
-        w_hmm    = cw2.slider("HMM Ens.",    0.0, 2.0, 1.5, 0.1, key="w_h")
-        w_pf     = cw3.slider("Part.Filter", 0.0, 2.0, 1.0, 0.1, key="w_pf")
-        w_tec    = cw4.slider("Técnico",     0.0, 2.0, 1.2, 0.1, key="w_t")
-        w_fund   = cw5.slider("Fundamental", 0.0, 2.0, 0.8, 0.1, key="w_f")
-        pesos_conf = {
-            "kalman": w_kalman, "hmm": w_hmm, "particle": w_pf,
-            "tecnico": w_tec,   "fundamental": w_fund,
-        }
+    # ── Inicializar pesos en session_state ──
+    if "pesos_optimizados" not in st.session_state:
+        st.session_state.pesos_optimizados = None
+    if "ticker_optimizado" not in st.session_state:
+        st.session_state.ticker_optimizado = ""
+
+    # ── Panel de pesos: auto o manual ──
+    with st.expander("⚙️ Pesos del motor — Auto-optimización", expanded=True):
+        modo_pesos = st.radio(
+            "",
+            ["🤖 Auto-optimizar (recomendado)", "🎛️ Manual (sliders)"],
+            horizontal=True, label_visibility="collapsed", key="modo_pesos"
+        )
+
+        if modo_pesos == "🤖 Auto-optimizar (recomendado)":
+            col_opt1, col_opt2, col_opt3 = st.columns([2, 2, 1])
+            opt_periodo = col_opt1.selectbox(
+                "Periodo histórico para optimizar",
+                ["1y", "2y", "3y"], index=1, key="opt_periodo"
+            )
+            opt_metrica = col_opt2.selectbox(
+                "Optimizar por",
+                ["Sharpe", "Calmar", "Retorno - |Drawdown|"], key="opt_metrica"
+            )
+            opt_metodo = col_opt3.selectbox(
+                "Método",
+                ["Grid (27 combos)", "Bayesiano (60 trials)"], key="opt_metodo"
+            )
+
+            ticker_cambio = motor_ticker != st.session_state.ticker_optimizado
+
+            if st.button("🔍 Optimizar pesos automáticamente", use_container_width=True, key="btn_auto_opt") or \
+               (st.session_state.pesos_optimizados is None and motor_ticker):
+
+                if motor_ticker:
+                    with st.spinner(f"Buscando pesos óptimos para {motor_ticker}…"):
+
+                        @st.cache_data(ttl=3600, show_spinner=False)
+                        def optimizar_pesos_cached(ticker, periodo, metrica, metodo):
+                            """Cache para no re-optimizar si el ticker y config no cambian"""
+                            serie_op = get_historico(ticker, periodo)
+                            if serie_op is None or len(serie_op) < 200:
+                                return None, None
+
+                            # Split 60/40 in-sample / out-of-sample
+                            corte    = int(len(serie_op) * 0.60)
+                            serie_is = serie_op.iloc[:corte]
+
+                            def evaluar_pesos(w_k, w_t, w_h):
+                                pesos_g = {"kalman": w_k, "tecnico": w_t, "hmm": w_h}
+                                n_is    = len(serie_is)
+                                tr_is   = serie_is.iloc[:n_is//2]
+                                te_is   = serie_is.iloc[n_is//2:]
+                                try:
+                                    res = ejecutar_motor_en_ventana(tr_is, te_is, pesos_g, 10000.0)
+                                    if metrica == "Sharpe":
+                                        return res["sharpe"]
+                                    elif metrica == "Calmar":
+                                        return res["calmar"]
+                                    else:
+                                        return res["ret"] - abs(res["maxdd"])
+                                except:
+                                    return -999.0
+
+                            mejor_score = -999.0
+                            mejor_pesos = {"kalman": 1.0, "tecnico": 1.0, "hmm": 1.0}
+                            historial   = []
+
+                            if "Grid" in metodo:
+                                # Grid search: 3×3×3 = 27 combinaciones
+                                grid_vals = [0.3, 1.0, 1.8]
+                                for w_k in grid_vals:
+                                    for w_t in grid_vals:
+                                        for w_h in grid_vals:
+                                            sc = evaluar_pesos(w_k, w_t, w_h)
+                                            historial.append({
+                                                "kalman": w_k, "tecnico": w_t,
+                                                "hmm": w_h, "score": sc
+                                            })
+                                            if sc > mejor_score:
+                                                mejor_score = sc
+                                                mejor_pesos = {"kalman":w_k,"tecnico":w_t,"hmm":w_h}
+                            else:
+                                # Bayesiano simplificado: Gaussian Process surrogate
+                                # con acquisition function UCB
+                                np.random.seed(42)
+                                # Fase 1: exploración aleatoria (20 puntos)
+                                puntos_x = []
+                                puntos_y = []
+                                for _ in range(20):
+                                    w_k = np.random.uniform(0.1, 2.0)
+                                    w_t = np.random.uniform(0.1, 2.0)
+                                    w_h = np.random.uniform(0.1, 2.0)
+                                    sc  = evaluar_pesos(w_k, w_t, w_h)
+                                    puntos_x.append([w_k, w_t, w_h])
+                                    puntos_y.append(sc)
+                                    historial.append({"kalman":w_k,"tecnico":w_t,"hmm":w_h,"score":sc})
+                                    if sc > mejor_score:
+                                        mejor_score = sc
+                                        mejor_pesos = {"kalman":w_k,"tecnico":w_t,"hmm":w_h}
+
+                                # Fase 2: explotación guiada (40 puntos)
+                                # Surrogate: promedio ponderado por distancia (Nadaraya-Watson)
+                                for _ in range(40):
+                                    # Generar candidatos y elegir el de mayor UCB
+                                    candidatos = np.random.uniform(0.1, 2.0, (50, 3))
+                                    X   = np.array(puntos_x)
+                                    Y   = np.array(puntos_y)
+                                    best_acq = -999; best_c = candidatos[0]
+
+                                    for c in candidatos:
+                                        # Distancias a puntos conocidos
+                                        dists = np.sqrt(((X - c)**2).sum(axis=1)) + 1e-6
+                                        bw    = np.median(dists)
+                                        w_nw  = np.exp(-dists**2/(2*bw**2))
+                                        w_nw /= w_nw.sum()
+                                        mu_c  = float(w_nw @ Y)
+                                        # Incertidumbre: dispersión ponderada
+                                        sigma_c = float(np.sqrt(w_nw @ (Y - mu_c)**2)) + 0.01
+                                        # UCB: balance explotación/exploración
+                                        acq = mu_c + 1.5 * sigma_c
+                                        if acq > best_acq:
+                                            best_acq = acq; best_c = c
+
+                                    w_k, w_t, w_h = best_c
+                                    sc = evaluar_pesos(w_k, w_t, w_h)
+                                    puntos_x.append([w_k, w_t, w_h])
+                                    puntos_y.append(sc)
+                                    historial.append({"kalman":w_k,"tecnico":w_t,"hmm":w_h,"score":sc})
+                                    if sc > mejor_score:
+                                        mejor_score = sc
+                                        mejor_pesos = {"kalman":w_k,"tecnico":w_t,"hmm":w_h}
+
+                            # Validar out-of-sample
+                            serie_os = serie_op.iloc[corte:]
+                            n_os     = len(serie_os)
+                            tr_os    = serie_os.iloc[:n_os//2]
+                            te_os    = serie_os.iloc[n_os//2:]
+                            try:
+                                res_os   = ejecutar_motor_en_ventana(tr_os, te_os, mejor_pesos, 10000.0)
+                                res_uni  = ejecutar_motor_en_ventana(
+                                    tr_os, te_os,
+                                    {"kalman":1.0,"tecnico":1.0,"hmm":1.0}, 10000.0
+                                )
+                            except:
+                                res_os = res_uni = None
+
+                            return {
+                                "pesos":       mejor_pesos,
+                                "score_is":    mejor_score,
+                                "res_os":      res_os,
+                                "res_uni":     res_uni,
+                                "historial":   historial,
+                                "n_trials":    len(historial),
+                                "metodo":      metodo,
+                                "metrica":     metrica,
+                            }, serie_op
+
+                        resultado_opt, _ = optimizar_pesos_cached(
+                            motor_ticker, opt_periodo, opt_metrica, opt_metodo
+                        )
+
+                        if resultado_opt is None:
+                            st.error("No hay suficientes datos para optimizar.")
+                        else:
+                            st.session_state.pesos_optimizados  = resultado_opt["pesos"]
+                            st.session_state.ticker_optimizado  = motor_ticker
+                            st.session_state._res_opt_completo  = resultado_opt
+
+            # Mostrar resultado de la optimización
+            if st.session_state.pesos_optimizados and st.session_state.ticker_optimizado == motor_ticker:
+                opt_r   = st.session_state.pesos_optimizados
+                full_r  = getattr(st.session_state, "_res_opt_completo", None)
+                res_os  = full_r["res_os"]  if full_r else None
+                res_uni = full_r["res_uni"] if full_r else None
+                hist_df = pd.DataFrame(full_r["historial"]) if full_r else None
+
+                # Cards de pesos encontrados
+                c1,c2,c3 = st.columns(3)
+                señales_w = [
+                    ("🌊 Kalman",    opt_r["kalman"],  c1),
+                    ("🔬 Técnico",   opt_r["tecnico"], c2),
+                    ("🧬 HMM",       opt_r["hmm"],     c3),
+                ]
+                for lbl_w, val_w, col_w in señales_w:
+                    dominante = val_w == max(opt_r.values())
+                    color_w   = "#00ff9d" if dominante else "#e8e8f0"
+                    col_w.markdown(f"""
+                    <div style='background:{"#00ff9d0a" if dominante else "#0a0a16"};
+                                border:1px solid {"#00ff9d33" if dominante else "#1c1c30"};
+                                border-radius:10px;padding:12px;text-align:center'>
+                        <div style='font-size:11px;color:#444466;font-family:JetBrains Mono;
+                                    letter-spacing:2px;margin-bottom:4px'>{lbl_w}</div>
+                        <div style='font-size:26px;font-weight:800;color:{color_w};
+                                    font-family:JetBrains Mono'>{val_w:.2f}</div>
+                        {"<div style='font-size:10px;color:#00ff9d;margin-top:2px'>★ DOMINANTE</div>" if dominante else ""}
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                # Comparativa IS vs OOS vs Uniforme
+                if res_os and res_uni:
+                    mejora = res_os["sharpe"] - res_uni["sharpe"]
+                    color_mj = "#00ff9d" if mejora > 0 else "#ff4466"
+                    st.markdown(f"""
+                    <div style='background:{color_mj}0a;border:1px solid {color_mj}22;
+                                border-left:3px solid {color_mj};border-radius:10px;
+                                padding:10px 16px;margin-top:10px;
+                                display:flex;gap:24px;flex-wrap:wrap;
+                                font-family:JetBrains Mono;font-size:12px'>
+                        <div>
+                            <div style='color:#444466;font-size:9px;letter-spacing:2px'>MÉTODO</div>
+                            <div style='color:#e8e8f0'>{full_r["metodo"]} · {full_r["n_trials"]} pruebas</div>
+                        </div>
+                        <div>
+                            <div style='color:#444466;font-size:9px;letter-spacing:2px'>SHARPE OOS (óptimo)</div>
+                            <div style='color:{color_mj};font-weight:700'>{res_os["sharpe"]:.3f}</div>
+                        </div>
+                        <div>
+                            <div style='color:#444466;font-size:9px;letter-spacing:2px'>SHARPE OOS (uniforme)</div>
+                            <div style='color:#888'>{res_uni["sharpe"]:.3f}</div>
+                        </div>
+                        <div>
+                            <div style='color:#444466;font-size:9px;letter-spacing:2px'>MEJORA</div>
+                            <div style='color:{color_mj};font-weight:700'>{mejora:+.3f}</div>
+                        </div>
+                        <div>
+                            <div style='color:#444466;font-size:9px;letter-spacing:2px'>RET OOS</div>
+                            <div style='color:{"#00ff9d" if res_os["ret"]>0 else "#ff4466"}'>{res_os["ret"]:+.1f}%</div>
+                        </div>
+                        <div>
+                            <div style='color:#444466;font-size:9px;letter-spacing:2px'>MAX DD OOS</div>
+                            <div style='color:#f59e0b'>{res_os["maxdd"]:.1f}%</div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                # Gráfica evolución de la optimización
+                if hist_df is not None and len(hist_df) > 5:
+                    hist_df["trial"] = range(1, len(hist_df)+1)
+                    hist_df["best_so_far"] = hist_df["score"].cummax()
+                    hist_df_clean = hist_df[hist_df["score"] > -900]
+
+                    fig_opt = go.Figure()
+                    fig_opt.add_trace(go.Scatter(
+                        x=hist_df_clean["trial"], y=hist_df_clean["score"],
+                        mode="markers", name="Score por trial",
+                        marker=dict(
+                            color=hist_df_clean["score"],
+                            colorscale=[[0,"#ff4466"],[0.5,"#f59e0b"],[1,"#00ff9d"]],
+                            size=7, opacity=0.7,
+                            colorbar=dict(title=full_r["metrica"] if full_r else "Score",
+                                         thickness=12, len=0.7)
+                        ),
+                    ))
+                    fig_opt.add_trace(go.Scatter(
+                        x=hist_df["trial"], y=hist_df["best_so_far"],
+                        name="Mejor acumulado", mode="lines",
+                        line=dict(color="#00ff9d", width=2),
+                    ))
+                    fig_opt.update_layout(
+                        template="plotly_dark", paper_bgcolor="#0e0e1e", plot_bgcolor="#0e0e1e",
+                        font=dict(family="Syne", color="#e8e8f0"),
+                        title=f"Convergencia de la optimización — {full_r['metodo'] if full_r else ''}",
+                        height=260, margin=dict(l=16,r=16,t=48,b=16),
+                        xaxis=dict(title="Trial #", showgrid=False, color="#444466"),
+                        yaxis=dict(title=full_r["metrica"] if full_r else "Score",
+                                   gridcolor="#1c1c30", color="#444466"),
+                        legend=dict(bgcolor="#0a0a16", font=dict(family="JetBrains Mono", size=11)),
+                    )
+                    st.plotly_chart(fig_opt, use_container_width=True)
+
+                pesos_conf = st.session_state.pesos_optimizados
+                # Agregar particle y fundamental con peso fijo (no optimizados por velocidad)
+                pesos_conf["particle"]    = 0.8
+                pesos_conf["fundamental"] = 0.6
+
+            else:
+                # Pesos por defecto mientras no se optimiza
+                pesos_conf = {"kalman":1.0,"hmm":1.5,"particle":0.8,"tecnico":1.2,"fundamental":0.6}
+                st.info("💡 Pulsa **Optimizar pesos automáticamente** para que el sistema aprenda "
+                        "los mejores pesos para este ticker con datos históricos reales.")
+
+        else:  # Manual
+            cw1, cw2, cw3, cw4, cw5 = st.columns(5)
+            w_kalman = cw1.slider("Kalman",      0.0, 2.0, 1.0, 0.1, key="w_k")
+            w_hmm    = cw2.slider("HMM Ens.",    0.0, 2.0, 1.5, 0.1, key="w_h")
+            w_pf     = cw3.slider("Part.Filter", 0.0, 2.0, 1.0, 0.1, key="w_pf")
+            w_tec    = cw4.slider("Técnico",     0.0, 2.0, 1.2, 0.1, key="w_t")
+            w_fund   = cw5.slider("Fundamental", 0.0, 2.0, 0.8, 0.1, key="w_f")
+            pesos_conf = {
+                "kalman": w_kalman, "hmm": w_hmm, "particle": w_pf,
+                "tecnico": w_tec,   "fundamental": w_fund,
+            }
 
     if not motor_ticker:
         st.markdown("""
