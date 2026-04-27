@@ -901,6 +901,7 @@ with st.sidebar:
         "⚖️  Kelly Sizing":     "kelly",
         "🧪  Lab Quant":        "lab",
         "🎯  Motor Decisión":   "motor",
+        "🔬  Validación Pro":   "validacion",
     }
     for label, key in vistas.items():
         active = st.session_state.vista == key
@@ -3328,3 +3329,931 @@ elif st.session_state.vista == "motor":
                     f"Probabilidad de ganancia según Monte Carlo: {prob_ganancia:.0f} por ciento en 30 días."
                 )
                 st.components.v1.html(audio_tts_html(texto_motor), height=60)
+
+# ═══════════════════════════════════════════════════════════
+#  🔬 VALIDACIÓN PRO
+#  Walk-forward del motor completo · Optimización de pesos
+#  Drawdown controls · Portfolio sizing con correlaciones
+# ═══════════════════════════════════════════════════════════
+elif st.session_state.vista == "validacion":
+
+    st.markdown("""
+    <div style='padding:28px 0 8px'>
+        <div class='label-tag'>VALIDACIÓN RIGUROSA DEL SISTEMA</div>
+        <div style='font-size:28px;font-weight:800;letter-spacing:-0.5px'>🔬 Validación Pro</div>
+        <div style='color:#666;font-size:13px;margin-top:6px'>
+            Walk-Forward del Motor Completo · Optimización Automática de Pesos ·
+            Drawdown Controls · Portfolio Sizing con Correlaciones
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    port_v = st.session_state.portfolio.reset_index(drop=True)
+    tickers_v = port_v["Ticker"].tolist() if not port_v.empty else []
+
+    tab_wf, tab_opt, tab_dd, tab_ps = st.tabs([
+        "📊 Walk-Forward Motor",
+        "🧬 Optimización de Pesos",
+        "🛡️ Drawdown Controls",
+        "📐 Portfolio Sizing",
+    ])
+
+    # ─────────────────────────────────────────────────────
+    #  FUNCIONES COMPARTIDAS
+    # ─────────────────────────────────────────────────────
+
+    def score_motor_rapido(serie, pesos):
+        """
+        Versión vectorizada del motor: calcula score combinado para
+        una ventana de datos. Omite Fundamental (lento) en backtesting.
+        Retorna score ∈ [-1, 1]
+        """
+        try:
+            # Kalman
+            p = serie.astype(float).values
+            xhat, P, Q, R = p[0], 1.0, 1e-5, 0.01**2
+            for pp in p:
+                Pm=P+Q; K=Pm/(Pm+R); xhat=xhat+K*(pp-xhat); P=(1-K)*Pm
+            s_kal = float(np.clip(-((p[-1]-xhat)/xhat*100)/5, -1, 1))
+        except: s_kal = 0.0
+
+        try:
+            # Técnico
+            close = serie.astype(float)
+            rsi_s = calcular_rsi(close)
+            _, _, hist_s = calcular_macd(close)
+            rsi_v  = float(rsi_s.iloc[-1])  if not np.isnan(rsi_s.iloc[-1])  else 50
+            hist_v = float(hist_s.iloc[-1]) if not np.isnan(hist_s.iloc[-1]) else 0
+            bb_u, _, bb_l = calcular_bollinger(close)
+            pv = float(close.iloc[-1])
+            bu = float(bb_u.iloc[-1]) if not np.isnan(bb_u.iloc[-1]) else pv*1.02
+            bl = float(bb_l.iloc[-1]) if not np.isnan(bb_l.iloc[-1]) else pv*0.98
+            sc = (50-rsi_v)/50*0.4 + np.sign(hist_v)*0.3
+            if pv < bl: sc += 0.3
+            elif pv > bu: sc -= 0.3
+            s_tec = float(np.clip(sc, -1, 1))
+        except: s_tec = 0.0
+
+        try:
+            # HMM ligero (solo 30 iteraciones para velocidad)
+            estados_r, _ = hmm_regimen(serie, n_iter=30)
+            if estados_r is not None:
+                estado_r = int(estados_r[-1])
+                s_hmm = float((estado_r - 1.0) * 0.7)
+            else:
+                s_hmm = 0.0
+        except: s_hmm = 0.0
+
+        # Score ponderado
+        w_tot = pesos["kalman"] + pesos["tecnico"] + pesos["hmm"]
+        if w_tot == 0: return 0.0
+        score = (s_kal*pesos["kalman"] + s_tec*pesos["tecnico"] + s_hmm*pesos["hmm"]) / w_tot
+        return float(np.clip(score, -1, 1))
+
+    def ejecutar_motor_en_ventana(serie_tr, serie_te, pesos, capital,
+                                   umbral_compra=0.60, umbral_venta=0.40,
+                                   stop_pct=0.07, tp_pct=0.12):
+        """
+        Ejecuta el motor completo en una ventana test.
+        Señales generadas mirando solo datos de train (sin lookahead).
+        """
+        pos = 0; cap = capital; acc = 0; precio_entrada = None
+        vals = [capital]; trades_n = 0; wins = 0; max_val = capital
+
+        for j in range(len(serie_te)):
+            # Ventana expandida: train + lo visto hasta j
+            serie_vista = pd.concat([serie_tr, serie_te.iloc[:j+1]])
+            p = float(serie_te.iloc[j])
+
+            if j % 5 == 0:  # recalcular señal cada 5 días (eficiencia)
+                score = score_motor_rapido(serie_vista.iloc[-120:], pesos)
+                prob  = 1/(1+np.exp(-score*4))
+            else:
+                prob = prob  # mantener la última
+
+            val_actual = cap + acc*p
+            max_val    = max(max_val, val_actual)
+
+            # Stop loss / take profit dinámicos
+            if pos == 1 and precio_entrada:
+                ret_pos = (p - precio_entrada) / precio_entrada
+                if ret_pos <= -stop_pct or ret_pos >= tp_pct:
+                    ganancia = p - precio_entrada
+                    if ganancia > 0: wins += 1
+                    cap = acc*p; acc = 0; pos = 0; precio_entrada = None
+
+            # Señal de compra
+            if pos == 0 and prob >= umbral_compra and cap > 0:
+                acc = cap/p; cap = 0; pos = 1
+                precio_entrada = p; trades_n += 1
+
+            # Señal de venta
+            elif pos == 1 and prob <= umbral_venta:
+                ganancia = p - (precio_entrada or p)
+                if ganancia > 0: wins += 1
+                cap = acc*p; acc = 0; pos = 0; precio_entrada = None
+                trades_n += 1
+
+            vals.append(cap + acc*p)
+
+        if pos == 1: cap = acc*float(serie_te.iloc[-1])
+        final = cap
+        ret   = (final/capital - 1) * 100
+        bnh   = (float(serie_te.iloc[-1])/float(serie_te.iloc[0]) - 1) * 100
+
+        s = pd.Series(vals)
+        dr = s.pct_change().dropna()
+        sharpe  = float(dr.mean()/dr.std()*np.sqrt(252)) if dr.std()>0 else 0
+        maxdd   = float(((s/s.cummax())-1).min()*100)
+        calmar  = abs(ret/maxdd) if maxdd != 0 else 0
+        wr      = (wins/trades_n*100) if trades_n > 0 else 0
+        var_95  = float(np.percentile(dr, 5)) if len(dr)>0 else -0.02
+        es_95   = float(dr[dr<=var_95].mean()) if len(dr[dr<=var_95])>0 else var_95
+
+        return {
+            "ret": round(ret,2), "bnh": round(bnh,2),
+            "sharpe": round(sharpe,3), "calmar": round(calmar,3),
+            "maxdd": round(maxdd,2), "wr": round(wr,1),
+            "n_trades": trades_n, "var_95": round(var_95*100,2),
+            "es_95": round(es_95*100,2), "vals": vals,
+        }
+
+    # ─────────────────────────────────────────
+    #  TAB 1 — WALK-FORWARD DEL MOTOR COMPLETO
+    # ─────────────────────────────────────────
+    with tab_wf:
+        st.markdown("""
+        <div style='color:#888;font-size:13px;margin-bottom:16px'>
+        Walk-forward sobre el <strong>motor completo</strong> (Kalman+HMM+Técnico),
+        no solo RSI+MACD. Mide Sharpe, Calmar, VaR, ES y consistencia real
+        a través de múltiples regímenes históricos.
+        </div>
+        """, unsafe_allow_html=True)
+
+        c1,c2,c3,c4 = st.columns(4)
+        wfp_ticker  = c1.text_input("Ticker", value=tickers_v[0] if tickers_v else "SPY", key="wfp_t")
+        wfp_train   = c2.selectbox("Ventana train (días)", [60,90,120,180,252], index=2, key="wfp_tr")
+        wfp_test    = c3.selectbox("Ventana test (días)",  [15,20,30,45], index=1, key="wfp_te")
+        wfp_capital = c4.number_input("Capital $", value=10000.0, step=1000.0, key="wfp_c")
+
+        c5,c6,c7 = st.columns(3)
+        wfp_stop   = c5.slider("Stop Loss %", 2.0, 15.0, 7.0, 0.5, key="wfp_sl") / 100
+        wfp_tp     = c6.slider("Take Profit %", 5.0, 25.0, 12.0, 0.5, key="wfp_tp") / 100
+        wfp_umbral = c7.slider("Umbral compra prob.", 0.55, 0.80, 0.62, 0.01, key="wfp_ub")
+
+        pesos_wfp = {"kalman": 1.0, "tecnico": 1.2, "hmm": 1.5}
+
+        if st.button("▶ Ejecutar Walk-Forward Motor Completo", use_container_width=True, key="wfp_run"):
+            with st.spinner("Ejecutando walk-forward del motor… (puede tardar 1-2 min)"):
+                serie_wfp = get_historico(wfp_ticker, "5y")
+                if serie_wfp is None or len(serie_wfp) < wfp_train + wfp_test + 10:
+                    st.error("Datos insuficientes para walk-forward.")
+                else:
+                    resultados_wfp = []
+                    n_wfp  = len(serie_wfp)
+                    start  = wfp_train
+                    prog   = st.progress(0)
+                    total_v= max(1, (n_wfp - wfp_train) // wfp_test)
+                    vi     = 0
+
+                    while start + wfp_test <= n_wfp:
+                        tr = serie_wfp.iloc[start-wfp_train:start]
+                        te = serie_wfp.iloc[start:start+wfp_test]
+                        r  = ejecutar_motor_en_ventana(
+                            tr, te, pesos_wfp, wfp_capital,
+                            umbral_compra=wfp_umbral,
+                            umbral_venta=1-wfp_umbral,
+                            stop_pct=wfp_stop, tp_pct=wfp_tp
+                        )
+                        r["fecha"] = str(te.index[0].date())
+                        r["fecha_fin"] = str(te.index[-1].date())
+
+                        # Detectar régimen de la ventana train
+                        try:
+                            est_r, _ = hmm_regimen(tr, n_iter=20)
+                            r["regimen"] = nombre_regimen(int(est_r[-1])) if est_r is not None else "?"
+                        except:
+                            r["regimen"] = "?"
+
+                        resultados_wfp.append(r)
+                        start += wfp_test
+                        vi += 1
+                        prog.progress(min(vi/total_v, 1.0))
+
+                    prog.empty()
+                    df_wfp = pd.DataFrame(resultados_wfp)
+
+                    # ── Métricas globales ──
+                    n_tot   = len(df_wfp)
+                    n_beat  = (df_wfp["ret"] > df_wfp["bnh"]).sum()
+                    n_pos   = (df_wfp["ret"] > 0).sum()
+                    sharpe_m= df_wfp["sharpe"].mean()
+                    calmar_m= df_wfp["calmar"].mean()
+                    wr_m    = df_wfp["wr"].mean()
+                    dd_m    = df_wfp["maxdd"].mean()
+                    var_m   = df_wfp["var_95"].mean()
+                    es_m    = df_wfp["es_95"].mean()
+                    ret_m   = df_wfp["ret"].mean()
+                    ret_std = df_wfp["ret"].std()
+                    consistencia = n_pos/n_tot*100 if n_tot>0 else 0
+
+                    pct_beat = n_beat/n_tot*100 if n_tot>0 else 0
+                    color_v  = "#00ff9d" if pct_beat>=60 else "#f59e0b" if pct_beat>=45 else "#ff4466"
+                    veredicto= ("✅ MOTOR ROBUSTO" if pct_beat>=60 and sharpe_m>0.5
+                                else "⚠️ MOTOR MIXTO" if pct_beat>=45
+                                else "❌ MOTOR DÉBIL")
+
+                    st.markdown(f"""
+                    <div style='background:{color_v}11;border:2px solid {color_v}44;
+                                border-radius:16px;padding:24px 28px;margin:16px 0'>
+                        <div style='font-size:24px;font-weight:800;color:{color_v};margin-bottom:16px'>
+                            {veredicto}
+                        </div>
+                        <div style='display:flex;gap:28px;flex-wrap:wrap;font-family:JetBrains Mono'>
+                        {''.join([f"""
+                        <div>
+                            <div style='font-size:9px;color:#444466;letter-spacing:2px;text-transform:uppercase'>{lbl}</div>
+                            <div style='font-size:19px;font-weight:700;color:{cl}'>{val}</div>
+                        </div>""" for lbl,val,cl in [
+                            ("Supera B&H", f"{n_beat}/{n_tot} ({pct_beat:.0f}%)", color_v),
+                            ("Consistencia", f"{consistencia:.0f}%", "#00ff9d" if consistencia>60 else "#f59e0b"),
+                            ("Sharpe medio", f"{sharpe_m:.3f}", "#00ff9d" if sharpe_m>0.8 else "#f59e0b" if sharpe_m>0 else "#ff4466"),
+                            ("Calmar ratio", f"{calmar_m:.3f}", "#00ff9d" if calmar_m>0.5 else "#f59e0b"),
+                            ("Win rate", f"{wr_m:.1f}%", "#00ff9d" if wr_m>55 else "#f59e0b" if wr_m>45 else "#ff4466"),
+                            ("Max DD medio", f"{dd_m:.1f}%", "#00ff9d" if abs(dd_m)<10 else "#f59e0b" if abs(dd_m)<20 else "#ff4466"),
+                            ("VaR 95% medio", f"{var_m:.2f}%", "#00ff9d" if abs(var_m)<2 else "#f59e0b"),
+                            ("Ret ± std", f"{ret_m:.1f}±{ret_std:.1f}%", color_v),
+                        ]])}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    # Gráfica retorno por ventana coloreada por régimen
+                    reg_colors = {
+                        "🐂 ALCISTA": "#00ff9d",
+                        "↔️ LATERAL": "#f59e0b",
+                        "🐻 BAJISTA": "#ff4466",
+                        "?": "#888",
+                    }
+                    fig_wfp = go.Figure()
+                    for reg, rc in reg_colors.items():
+                        mask_r = df_wfp["regimen"] == reg
+                        if mask_r.any():
+                            fig_wfp.add_trace(go.Bar(
+                                x=df_wfp[mask_r]["fecha"],
+                                y=df_wfp[mask_r]["ret"],
+                                name=f"Motor {reg}",
+                                marker_color=rc, opacity=0.85,
+                            ))
+                    fig_wfp.add_trace(go.Scatter(
+                        x=df_wfp["fecha"], y=df_wfp["bnh"],
+                        name="Buy & Hold", mode="lines+markers",
+                        line=dict(color="#ffffff55", width=1.5, dash="dot"),
+                        marker=dict(size=4),
+                    ))
+                    fig_wfp.add_hline(y=0, line=dict(color="#2a2a44", width=1))
+                    fig_wfp.update_layout(
+                        template="plotly_dark", paper_bgcolor="#0e0e1e", plot_bgcolor="#0e0e1e",
+                        font=dict(family="Syne", color="#e8e8f0"),
+                        title=f"Retorno por ventana ({wfp_test}d) — coloreado por régimen HMM",
+                        height=340, margin=dict(l=16,r=16,t=48,b=16), barmode="stack",
+                        xaxis=dict(showgrid=False, color="#444466"),
+                        yaxis=dict(gridcolor="#1c1c30", color="#444466", ticksuffix="%"),
+                        legend=dict(bgcolor="#0a0a16", font=dict(family="JetBrains Mono", size=11)),
+                    )
+                    st.plotly_chart(fig_wfp, use_container_width=True)
+
+                    # Sharpe acumulado rolling
+                    sharpe_rolling = df_wfp["sharpe"].expanding().mean()
+                    fig_sh = go.Figure()
+                    fig_sh.add_trace(go.Scatter(
+                        x=df_wfp["fecha"], y=sharpe_rolling,
+                        name="Sharpe acumulado", fill="tozeroy",
+                        line=dict(color="#00ff9d", width=2),
+                        fillcolor="rgba(0,255,157,0.06)",
+                    ))
+                    fig_sh.add_hline(y=1.0, line=dict(color="#f59e0b", dash="dash", width=1),
+                                     annotation_text="Sharpe=1 (bueno)")
+                    fig_sh.add_hline(y=0.0, line=dict(color="#ff4466", dash="dash", width=1))
+                    fig_sh.update_layout(
+                        template="plotly_dark", paper_bgcolor="#0e0e1e", plot_bgcolor="#0e0e1e",
+                        title="Sharpe ratio acumulado — estabilidad del motor",
+                        height=240, margin=dict(l=16,r=16,t=48,b=16), font=dict(family="Syne"),
+                        xaxis=dict(showgrid=False, color="#444466"),
+                        yaxis=dict(gridcolor="#1c1c30", color="#444466"),
+                    )
+                    st.plotly_chart(fig_sh, use_container_width=True)
+
+    # ─────────────────────────────────────────
+    #  TAB 2 — OPTIMIZACIÓN AUTOMÁTICA DE PESOS
+    # ─────────────────────────────────────────
+    with tab_opt:
+        st.markdown("""
+        <div style='color:#888;font-size:13px;margin-bottom:16px'>
+        En vez de ajustar pesos manualmente, el sistema busca automáticamente
+        la combinación que maximiza el Sharpe ratio out-of-sample.
+        Usa búsqueda en grid sobre el espacio de pesos.
+        </div>
+        """, unsafe_allow_html=True)
+
+        c1, c2, c3 = st.columns(3)
+        opt_ticker  = c1.text_input("Ticker", value=tickers_v[0] if tickers_v else "SPY", key="opt_t")
+        opt_capital = c2.number_input("Capital $", value=10000.0, step=1000.0, key="opt_c")
+        opt_metric  = c3.selectbox("Optimizar por", ["Sharpe", "Calmar", "Retorno - Drawdown"], key="opt_m")
+
+        if st.button("🔍 Buscar pesos óptimos automáticamente", use_container_width=True, key="opt_run"):
+            with st.spinner("Explorando espacio de pesos… puede tardar 1-2 min…"):
+                serie_opt = get_historico(opt_ticker, "3y")
+                if serie_opt is None or len(serie_opt) < 200:
+                    st.error("Datos insuficientes.")
+                else:
+                    # Dividir: 60% in-sample (optimización), 40% out-of-sample (validación)
+                    corte    = int(len(serie_opt) * 0.60)
+                    serie_is = serie_opt.iloc[:corte]
+                    serie_os = serie_opt.iloc[corte:]
+
+                    # Grid de pesos — 3 valores por señal = 27 combinaciones
+                    grid = [0.5, 1.0, 1.5]
+                    mejores_pesos = None
+                    mejor_score_is= -999
+                    resultados_grid = []
+
+                    prog_opt = st.progress(0)
+                    total_comb = len(grid)**3
+                    ci_opt = 0
+
+                    for w_k in grid:
+                        for w_t in grid:
+                            for w_h in grid:
+                                pesos_g = {"kalman": w_k, "tecnico": w_t, "hmm": w_h}
+                                # Evaluar in-sample con ventana simple
+                                n_is = len(serie_is)
+                                train_is = serie_is.iloc[:n_is//2]
+                                test_is  = serie_is.iloc[n_is//2:]
+                                try:
+                                    res_is = ejecutar_motor_en_ventana(
+                                        train_is, test_is, pesos_g, opt_capital
+                                    )
+                                    if opt_metric == "Sharpe":
+                                        metric_val = res_is["sharpe"]
+                                    elif opt_metric == "Calmar":
+                                        metric_val = res_is["calmar"]
+                                    else:
+                                        metric_val = res_is["ret"] - abs(res_is["maxdd"])
+                                except:
+                                    metric_val = -999
+
+                                resultados_grid.append({
+                                    "w_kalman": w_k, "w_tecnico": w_t, "w_hmm": w_h,
+                                    "metric_is": round(metric_val, 3),
+                                })
+                                if metric_val > mejor_score_is:
+                                    mejor_score_is = metric_val
+                                    mejores_pesos  = pesos_g.copy()
+
+                                ci_opt += 1
+                                prog_opt.progress(ci_opt / total_comb)
+
+                    prog_opt.empty()
+
+                    # Validar los mejores pesos out-of-sample
+                    n_os = len(serie_os)
+                    train_os = serie_os.iloc[:n_os//2]
+                    test_os  = serie_os.iloc[n_os//2:]
+
+                    try:
+                        res_os_best = ejecutar_motor_en_ventana(
+                            train_os, test_os, mejores_pesos, opt_capital
+                        )
+                    except:
+                        res_os_best = None
+
+                    # Comparar con pesos uniformes
+                    pesos_uni = {"kalman": 1.0, "tecnico": 1.0, "hmm": 1.0}
+                    try:
+                        res_os_uni = ejecutar_motor_en_ventana(
+                            train_os, test_os, pesos_uni, opt_capital
+                        )
+                    except:
+                        res_os_uni = None
+
+                    # Resultado principal
+                    st.markdown(f"""
+                    <div style='background:#00ff9d0a;border:1px solid #00ff9d33;
+                                border-radius:14px;padding:22px 26px;margin:16px 0'>
+                        <div style='font-size:11px;color:#444466;font-family:JetBrains Mono;
+                                    letter-spacing:2px;margin-bottom:8px'>
+                            PESOS ÓPTIMOS ENCONTRADOS — {opt_ticker}
+                        </div>
+                        <div style='display:flex;gap:24px;flex-wrap:wrap;margin-bottom:16px'>
+                            {' '.join([f"""<div style='background:#0a0a16;border:1px solid #1c1c30;
+                                border-radius:10px;padding:12px 18px;text-align:center'>
+                                <div style='font-size:10px;color:#444466;font-family:JetBrains Mono;
+                                            letter-spacing:2px'>{lbl}</div>
+                                <div style='font-size:24px;font-weight:800;color:#00ff9d;
+                                            font-family:JetBrains Mono'>{val:.1f}</div>
+                            </div>""" for lbl,val in [
+                                ("KALMAN", mejores_pesos["kalman"]),
+                                ("TÉCNICO", mejores_pesos["tecnico"]),
+                                ("HMM", mejores_pesos["hmm"]),
+                            ]])}
+                        </div>
+                        <div style='font-size:12px;color:#666;font-family:JetBrains Mono'>
+                            Optimizados sobre 60% de los datos · Validados en el 40% restante (out-of-sample estricto)
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    if res_os_best and res_os_uni:
+                        mejora_sharpe = res_os_best["sharpe"] - res_os_uni["sharpe"]
+                        mejora_ret    = res_os_best["ret"]    - res_os_uni["ret"]
+                        color_mj = "#00ff9d" if mejora_sharpe > 0 else "#ff4466"
+
+                        c1, c2, c3, c4 = st.columns(4)
+                        c1.metric("📈 Retorno OOS (óptimo)", f"{res_os_best['ret']:+.2f}%",
+                                  f"{mejora_ret:+.2f}% vs uniforme")
+                        c2.metric("⚡ Sharpe OOS (óptimo)", f"{res_os_best['sharpe']:.3f}",
+                                  f"{mejora_sharpe:+.3f} vs uniforme")
+                        c3.metric("📊 Retorno OOS (uniforme)", f"{res_os_uni['ret']:+.2f}%")
+                        c4.metric("📉 Max DD OOS", f"{res_os_best['maxdd']:.1f}%")
+
+                        st.markdown(f"""
+                        <div style='background:{color_mj}11;border:1px solid {color_mj}33;
+                                    border-left:4px solid {color_mj};border-radius:10px;
+                                    padding:12px 18px;margin-top:8px;font-size:13px;color:{color_mj}'>
+                            {"✅ Los pesos óptimos mejoran al sistema uniforme out-of-sample." if mejora_sharpe>0
+                             else "⚠️ Los pesos óptimos no mejoran significativamente. El motor es robusto con pesos iguales."}
+                            &nbsp; Sharpe: {res_os_best['sharpe']:.3f} vs {res_os_uni['sharpe']:.3f}
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                    # Heatmap del grid (fijo w_hmm=mejor)
+                    df_grid = pd.DataFrame(resultados_grid)
+                    best_h  = mejores_pesos["hmm"]
+                    df_grid_h = df_grid[df_grid["w_hmm"] == best_h]
+                    pivot = df_grid_h.pivot(index="w_tecnico", columns="w_kalman", values="metric_is")
+
+                    fig_heat = go.Figure(go.Heatmap(
+                        z=pivot.values, x=[str(c) for c in pivot.columns],
+                        y=[str(i) for i in pivot.index],
+                        colorscale=[[0,"#ff4466"],[0.5,"#0e0e1e"],[1,"#00ff9d"]],
+                        text=np.round(pivot.values,3), texttemplate="%{text}",
+                        textfont=dict(size=12, family="JetBrains Mono"),
+                    ))
+                    fig_heat.update_layout(
+                        template="plotly_dark", paper_bgcolor="#0e0e1e",
+                        title=f"Grid de {opt_metric} (w_hmm={best_h}) — in-sample",
+                        height=320, margin=dict(l=16,r=16,t=48,b=16),
+                        font=dict(family="Syne", color="#e8e8f0"),
+                        xaxis_title="w_kalman", yaxis_title="w_tecnico",
+                    )
+                    st.plotly_chart(fig_heat, use_container_width=True)
+
+    # ─────────────────────────────────────────
+    #  TAB 3 — DRAWDOWN CONTROLS
+    # ─────────────────────────────────────────
+    with tab_dd:
+        st.markdown("""
+        <div style='color:#888;font-size:13px;margin-bottom:16px'>
+        Reglas automáticas de drawdown a nivel portafolio.
+        Si el portafolio cae más de X% en un período, se activan
+        acciones defensivas: reducir posiciones, mover a cash, alertar.
+        </div>
+        """, unsafe_allow_html=True)
+
+        c1, c2, c3 = st.columns(3)
+        dd_semanal  = c1.slider("Alerta DD semanal %",   3.0, 20.0, 7.0,  0.5, key="dd_s") / 100
+        dd_mensual  = c2.slider("Alerta DD mensual %",   5.0, 30.0, 15.0, 1.0, key="dd_m") / 100
+        dd_max      = c3.slider("Stop total portafolio %",10.0,40.0, 20.0, 1.0, key="dd_mx") / 100
+
+        st.markdown("<div class='label-tag' style='margin-top:8px'>Estado actual del portafolio</div>",
+                    unsafe_allow_html=True)
+
+        if port_v.empty:
+            st.info("Agrega acciones a tu portafolio para ver los controles de drawdown.")
+        else:
+            alertas_dd = []
+            total_actual_dd = 0.0
+            total_costo_dd  = 0.0
+            rows_dd = []
+
+            for i in range(len(port_v)):
+                row_dd = port_v.iloc[i]
+                stats_dd = motor_avanzado(row_dd["Ticker"])
+                compra_dd   = float(row_dd["Compra"])
+                cantidad_dd = float(row_dd["Cantidad"])
+                costo_dd    = float(row_dd.get("Costo", compra_dd*cantidad_dd))
+
+                if stats_dd:
+                    _, actual_dd, _ = stats_dd
+                    val_dd  = actual_dd * cantidad_dd
+                    rend_dd = (val_dd - costo_dd) / costo_dd * 100 if costo_dd > 0 else 0
+                else:
+                    actual_dd = compra_dd
+                    val_dd    = costo_dd
+                    rend_dd   = 0.0
+
+                # Drawdown desde el costo base
+                dd_pos = min(0.0, (actual_dd - compra_dd) / compra_dd) if compra_dd > 0 else 0.0
+                total_actual_dd += val_dd
+                total_costo_dd  += costo_dd
+
+                nivel_alerta = "ok"
+                if abs(dd_pos) >= dd_max:    nivel_alerta = "critico"
+                elif abs(dd_pos) >= dd_mensual: nivel_alerta = "alto"
+                elif abs(dd_pos) >= dd_semanal: nivel_alerta = "medio"
+
+                if nivel_alerta != "ok":
+                    alertas_dd.append(row_dd["Ticker"])
+
+                rows_dd.append({
+                    "ticker": row_dd["Ticker"],
+                    "rend": rend_dd,
+                    "dd_pos": dd_pos*100,
+                    "val": val_dd,
+                    "nivel": nivel_alerta,
+                })
+
+            # DD total del portafolio
+            dd_total = (total_actual_dd - total_costo_dd) / total_costo_dd * 100 if total_costo_dd > 0 else 0
+            dd_total_frac = dd_total / 100
+
+            # Determinar acción del portafolio
+            if abs(dd_total_frac) >= dd_max:
+                accion_port = "🚨 STOP TOTAL — Reducir todo al mínimo"
+                color_port  = "#ff0044"
+                reduccion_rec = 0.80
+            elif abs(dd_total_frac) >= dd_mensual:
+                accion_port = "🔴 DRAWDOWN ALTO — Reducir posiciones 50%"
+                color_port  = "#ff4466"
+                reduccion_rec = 0.50
+            elif abs(dd_total_frac) >= dd_semanal:
+                accion_port = "🟡 ALERTA MODERADA — Reducir posiciones 25%"
+                color_port  = "#f59e0b"
+                reduccion_rec = 0.25
+            else:
+                accion_port = "✅ PORTAFOLIO DENTRO DE PARÁMETROS"
+                color_port  = "#00ff9d"
+                reduccion_rec = 0.0
+
+            # Panel de estado
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("📊 Valor actual", f"${total_actual_dd:,.2f}")
+            c2.metric("💰 Costo base",   f"${total_costo_dd:,.2f}")
+            c3.metric("📉 DD total",     f"{dd_total:.2f}%",
+                      "⚠️ Por debajo del umbral" if dd_total < -dd_semanal*100 else "✅ Normal")
+            c4.metric("🚨 Posiciones en alerta", len(alertas_dd))
+
+            st.markdown(f"""
+            <div style='background:{color_port}11;border:2px solid {color_port}44;
+                        border-radius:14px;padding:20px 24px;margin:16px 0'>
+                <div style='font-size:20px;font-weight:800;color:{color_port};margin-bottom:8px'>
+                    {accion_port}
+                </div>
+                <div style='font-family:JetBrains Mono;font-size:12px;color:#888'>
+                    DD portafolio: {dd_total:.2f}%
+                    &nbsp;·&nbsp; Umbral semanal: -{dd_semanal*100:.0f}%
+                    &nbsp;·&nbsp; Umbral mensual: -{dd_mensual*100:.0f}%
+                    &nbsp;·&nbsp; Stop total: -{dd_max*100:.0f}%
+                    {f"<br><br>⚡ Acción recomendada: reducir {reduccion_rec*100:.0f}% de cada posición" if reduccion_rec > 0 else ""}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Cards por posición
+            st.markdown("<div class='label-tag'>Estado por posición</div>", unsafe_allow_html=True)
+            color_nivel = {"ok":"#00ff9d","medio":"#f59e0b","alto":"#ff4466","critico":"#ff0044"}
+            icono_nivel = {"ok":"✅","medio":"⚠️","alto":"🔴","critico":"🚨"}
+            accion_nivel= {
+                "ok":      "Mantener",
+                "medio":   f"Reducir {dd_semanal*100:.0f}%",
+                "alto":    f"Reducir {dd_mensual*100:.0f}%",
+                "critico": "Cerrar posición",
+            }
+
+            cols_dd = st.columns(3)
+            for ci, r_dd in enumerate(rows_dd):
+                c_dd = color_nivel[r_dd["nivel"]]
+                with cols_dd[ci % 3]:
+                    st.markdown(f"""
+                    <div style='background:{c_dd}0d;border:1px solid {c_dd}44;
+                                border-radius:12px;padding:14px;margin-bottom:10px;text-align:center'>
+                        <div style='font-weight:800;font-size:16px'>{r_dd["ticker"]}</div>
+                        <div style='font-family:JetBrains Mono;font-size:18px;font-weight:700;
+                                    color:{c_dd};margin:6px 0'>
+                            {r_dd["rend"]:+.1f}%
+                        </div>
+                        <div style='font-size:11px;color:#666;font-family:JetBrains Mono'>
+                            DD pos: {r_dd["dd_pos"]:.1f}%
+                        </div>
+                        <div style='margin-top:8px;font-size:12px;font-weight:700;color:{c_dd}'>
+                            {icono_nivel[r_dd["nivel"]]} {accion_nivel[r_dd["nivel"]]}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+            # Reglas de drawdown aplicadas históricamente
+            st.markdown("<div class='label-tag' style='margin-top:16px'>Simulación: ¿cuánto hubiera protegido esta regla?</div>",
+                        unsafe_allow_html=True)
+            dd_sim_ticker = st.selectbox("Simular en:", ["SPY","QQQ"] + tickers_v, key="dd_sim_t")
+            if st.button("▶ Simular reglas de drawdown", use_container_width=True, key="dd_sim_run"):
+                with st.spinner("Simulando…"):
+                    serie_dds = get_historico(dd_sim_ticker, "3y")
+                    if serie_dds is None:
+                        st.error("Sin datos.")
+                    else:
+                        # Estrategia con reglas vs Buy & Hold
+                        cap_dd  = 10000.0; cap_bnh = 10000.0
+                        precio0 = float(serie_dds.iloc[0])
+                        acc_dd  = cap_dd / precio0; cap_libre = 0.0
+                        modo    = "invertido"  # o "cash"
+                        vals_dd = [cap_dd]; vals_bnh = [cap_bnh]
+                        peak_dd = cap_dd
+
+                        for j in range(1, len(serie_dds)):
+                            p_j = float(serie_dds.iloc[j])
+                            # BnH
+                            cap_bnh = 10000.0 * p_j / precio0
+                            # Con reglas
+                            val_j = acc_dd*p_j + cap_libre
+                            peak_dd = max(peak_dd, val_j)
+                            dd_j = (val_j - peak_dd) / peak_dd
+
+                            if dd_j <= -dd_max and modo == "invertido":
+                                # Stop total: vender todo
+                                cap_libre = acc_dd*p_j; acc_dd = 0; modo = "cash"
+                            elif dd_j <= -dd_mensual and modo == "invertido":
+                                # Reducir 50%
+                                cap_libre += acc_dd*0.5*p_j; acc_dd *= 0.5
+                            elif modo == "cash" and dd_j > -dd_semanal*0.5:
+                                # Reentrar cuando mejore
+                                acc_dd = (cap_libre + acc_dd*p_j) / p_j
+                                cap_libre = 0; modo = "invertido"
+
+                            vals_dd.append(acc_dd*p_j + cap_libre)
+                            vals_bnh.append(cap_bnh)
+
+                        ret_dd  = (vals_dd[-1]/10000-1)*100
+                        ret_bnh = (vals_bnh[-1]/10000-1)*100
+                        dd_max_sim_dd  = float(((pd.Series(vals_dd)/pd.Series(vals_dd).cummax())-1).min()*100)
+                        dd_max_sim_bnh = float(((pd.Series(vals_bnh)/pd.Series(vals_bnh).cummax())-1).min()*100)
+
+                        c1,c2,c3,c4 = st.columns(4)
+                        c1.metric("Con reglas DD", f"{ret_dd:+.1f}%")
+                        c2.metric("Buy & Hold",    f"{ret_bnh:+.1f}%")
+                        c3.metric("Max DD (con reglas)", f"{dd_max_sim_dd:.1f}%")
+                        c4.metric("Max DD (B&H)",        f"{dd_max_sim_bnh:.1f}%")
+
+                        fig_dds = go.Figure()
+                        fig_dds.add_trace(go.Scatter(
+                            x=serie_dds.index, y=vals_dd,
+                            name=f"Con reglas DD ({ret_dd:+.1f}%)",
+                            line=dict(color="#00ff9d", width=2),
+                            fill="tozeroy", fillcolor="rgba(0,255,157,0.05)"
+                        ))
+                        fig_dds.add_trace(go.Scatter(
+                            x=serie_dds.index, y=vals_bnh,
+                            name=f"Buy & Hold ({ret_bnh:+.1f}%)",
+                            line=dict(color="#f59e0b", width=1.5, dash="dot")
+                        ))
+                        fig_dds.update_layout(
+                            template="plotly_dark", paper_bgcolor="#0e0e1e", plot_bgcolor="#0e0e1e",
+                            title=f"Reglas de drawdown en {dd_sim_ticker} — 3 años",
+                            height=320, font=dict(family="Syne", color="#e8e8f0"),
+                            margin=dict(l=16,r=16,t=48,b=16), hovermode="x unified",
+                            xaxis=dict(showgrid=False, color="#444466"),
+                            yaxis=dict(gridcolor="#1c1c30", color="#444466", tickprefix="$"),
+                            legend=dict(bgcolor="#0a0a16", font=dict(family="JetBrains Mono", size=11)),
+                        )
+                        st.plotly_chart(fig_dds, use_container_width=True)
+
+    # ─────────────────────────────────────────
+    #  TAB 4 — PORTFOLIO SIZING CON CORRELACIONES
+    # ─────────────────────────────────────────
+    with tab_ps:
+        st.markdown("""
+        <div style='color:#888;font-size:13px;margin-bottom:16px'>
+        Position sizing que considera la correlación total del portafolio.
+        Calcula la contribución marginal al riesgo de cada posición (MCTR),
+        el VaR y Expected Shortfall del portafolio completo, y recomienda
+        pesos óptimos vía mínima varianza.
+        </div>
+        """, unsafe_allow_html=True)
+
+        ps_capital = st.number_input("Capital total $", value=10000.0, step=500.0, key="ps_cap")
+        ps_period  = st.select_slider("Periodo histórico", ["6mo","1y","2y"], value="1y", key="ps_per")
+
+        tickers_ps = tickers_v.copy()
+        extra_ps = st.text_input("Agregar tickers (separados por coma)", key="ps_extra")
+        if extra_ps.strip():
+            for tk in extra_ps.split(","):
+                tk = tk.strip().upper()
+                if tk and tk not in tickers_ps:
+                    tickers_ps.append(tk)
+
+        if len(tickers_ps) < 2:
+            st.info("Necesitas al menos 2 activos. Agrega al portafolio o escribe tickers arriba.")
+        elif st.button("▶ Calcular Portfolio Sizing Completo", use_container_width=True, key="ps_run"):
+            with st.spinner("Calculando matriz de covarianza, VaR, ES y pesos óptimos…"):
+                series_ps = {}
+                for tk in tickers_ps:
+                    s = get_historico(tk, ps_period)
+                    if s is not None and len(s) > 30:
+                        series_ps[tk] = s
+
+                if len(series_ps) < 2:
+                    st.error("No se pudo obtener datos de al menos 2 activos.")
+                else:
+                    df_ps   = pd.DataFrame(series_ps).dropna()
+                    ret_ps  = df_ps.pct_change().dropna()
+                    n_assets= len(series_ps)
+                    tks     = list(series_ps.keys())
+
+                    # Matriz de covarianza anualizada
+                    cov_mat = ret_ps.cov() * 252
+                    corr_mat_ps = ret_ps.corr()
+                    mu_vec  = ret_ps.mean() * 252  # retornos anuales esperados
+
+                    # ── Pesos actuales del portafolio ──
+                    pesos_actuales = np.ones(n_assets) / n_assets  # default: igual peso
+                    if not port_v.empty:
+                        vals_port = {}
+                        for tk in tks:
+                            row_tk = port_v[port_v["Ticker"]==tk]
+                            if not row_tk.empty:
+                                stats_tk = motor_avanzado(tk)
+                                p_tk = float(stats_tk[1]) if stats_tk else float(row_tk.iloc[0]["Compra"])
+                                vals_port[tk] = p_tk * float(row_tk.iloc[0]["Cantidad"])
+                            else:
+                                vals_port[tk] = ps_capital / n_assets
+                        total_vals = sum(vals_port.values())
+                        if total_vals > 0:
+                            pesos_actuales = np.array([vals_port.get(tk, 0)/total_vals for tk in tks])
+                            pesos_actuales = pesos_actuales / pesos_actuales.sum()
+
+                    cov_np = cov_mat.values
+
+                    # ── Métricas del portafolio actual ──
+                    sigma_port = float(np.sqrt(pesos_actuales @ cov_np @ pesos_actuales))
+                    ret_port   = float(pesos_actuales @ mu_vec.values)
+                    sharpe_port= ret_port / sigma_port if sigma_port > 0 else 0
+
+                    # VaR y ES del portafolio (paramétrico)
+                    var_port_95 = -1.645 * sigma_port / np.sqrt(252)
+                    es_port_95  = -2.063 * sigma_port / np.sqrt(252)
+
+                    # Contribución marginal al riesgo (MCTR)
+                    mctr = cov_np @ pesos_actuales / sigma_port
+                    ctc  = pesos_actuales * mctr  # contribución total al riesgo
+                    pct_ctc = ctc / ctc.sum() * 100 if ctc.sum() > 0 else ctc
+
+                    # ── Optimización: Mínima varianza ──
+                    from scipy.optimize import minimize
+                    def port_var(w):
+                        return float(w @ cov_np @ w)
+                    def port_sharpe_neg(w):
+                        r = float(w @ mu_vec.values)
+                        s = float(np.sqrt(w @ cov_np @ w))
+                        return -r/s if s > 0 else 0
+
+                    constraints = [{"type":"eq","fun":lambda w: w.sum()-1}]
+                    bounds = [(0.02, 0.60)] * n_assets  # 2%-60% por activo
+                    w0 = np.ones(n_assets)/n_assets
+
+                    # Min varianza
+                    res_mv = minimize(port_var, w0, method="SLSQP",
+                                      bounds=bounds, constraints=constraints)
+                    w_mv = res_mv.x if res_mv.success else w0
+
+                    # Max Sharpe
+                    res_ms = minimize(port_sharpe_neg, w0, method="SLSQP",
+                                      bounds=bounds, constraints=constraints)
+                    w_ms = res_ms.x if res_ms.success else w0
+
+                    sigma_mv = float(np.sqrt(w_mv @ cov_np @ w_mv))
+                    ret_mv   = float(w_mv @ mu_vec.values)
+                    sigma_ms = float(np.sqrt(w_ms @ cov_np @ w_ms))
+                    ret_ms   = float(w_ms @ mu_vec.values)
+
+                    # ── Panel resumen portafolio actual ──
+                    st.markdown("<div class='label-tag'>Portafolio actual</div>", unsafe_allow_html=True)
+                    c1,c2,c3,c4 = st.columns(4)
+                    c1.metric("📊 Volatilidad anual",   f"{sigma_port*100:.1f}%")
+                    c2.metric("📈 Retorno esperado",    f"{ret_port*100:.1f}%")
+                    c3.metric("⚡ Sharpe ratio",        f"{sharpe_port:.3f}")
+                    c4.metric("📉 VaR diario 95%",      f"{var_port_95*100:.2f}%",
+                              f"ES: {es_port_95*100:.2f}%")
+
+                    # ── Contribución al riesgo ──
+                    st.markdown("<div class='label-tag' style='margin-top:16px'>Contribución marginal al riesgo (MCTR)</div>",
+                                unsafe_allow_html=True)
+                    st.markdown("""
+                    <div style='color:#666;font-size:12px;margin-bottom:10px;font-family:JetBrains Mono'>
+                    Una posición que contribuye mucho más al riesgo que su peso sugiere que está
+                    sobrediversificada o que el activo es muy volátil en relación al portafolio.
+                    </div>""", unsafe_allow_html=True)
+
+                    fig_mctr = go.Figure()
+                    fig_mctr.add_trace(go.Bar(
+                        x=tks, y=pesos_actuales*100,
+                        name="Peso actual (%)",
+                        marker_color="#3b82f6", opacity=0.8,
+                    ))
+                    fig_mctr.add_trace(go.Bar(
+                        x=tks, y=pct_ctc,
+                        name="Contribución al riesgo (%)",
+                        marker_color=["#ff4466" if c > p+5 else "#00ff9d" if c < p-5 else "#f59e0b"
+                                      for c, p in zip(pct_ctc, pesos_actuales*100)],
+                        opacity=0.9,
+                    ))
+                    fig_mctr.update_layout(
+                        template="plotly_dark", paper_bgcolor="#0e0e1e", plot_bgcolor="#0e0e1e",
+                        font=dict(family="Syne", color="#e8e8f0"), barmode="group", height=300,
+                        margin=dict(l=16,r=16,t=16,b=16), xaxis=dict(showgrid=False, color="#444466"),
+                        yaxis=dict(gridcolor="#1c1c30", color="#444466", ticksuffix="%"),
+                        legend=dict(bgcolor="#0a0a16", font=dict(family="JetBrains Mono", size=11)),
+                        title="Verde = peso > riesgo (eficiente) · Rojo = riesgo > peso (revisar)",
+                    )
+                    st.plotly_chart(fig_mctr, use_container_width=True)
+
+                    # ── Comparativa: actual vs min-var vs max-sharpe ──
+                    st.markdown("<div class='label-tag' style='margin-top:8px'>Portafolios óptimos vs actual</div>",
+                                unsafe_allow_html=True)
+
+                    estrategias = [
+                        ("Actual",      pesos_actuales, sigma_port,  ret_port,  sharpe_port, "#888"),
+                        ("Min. Var.",   w_mv,           sigma_mv,    ret_mv,    ret_mv/sigma_mv if sigma_mv>0 else 0, "#3b82f6"),
+                        ("Max Sharpe",  w_ms,           sigma_ms,    ret_ms,    ret_ms/sigma_ms if sigma_ms>0 else 0, "#00ff9d"),
+                    ]
+
+                    cols_est = st.columns(3)
+                    for ci_e, (nombre_e, pesos_e, sig_e, ret_e, sharpe_e, color_e) in enumerate(estrategias):
+                        var_e = -1.645 * sig_e / np.sqrt(252)
+                        with cols_est[ci_e]:
+                            st.markdown(f"""
+                            <div style='background:{color_e}0d;border:1px solid {color_e}33;
+                                        border-radius:12px;padding:16px;margin-bottom:12px'>
+                                <div style='font-size:10px;letter-spacing:2px;color:#444466;
+                                            font-family:JetBrains Mono;text-transform:uppercase;
+                                            margin-bottom:8px'>{nombre_e}</div>
+                                <div style='font-family:JetBrains Mono;font-size:18px;
+                                            font-weight:700;color:{color_e};margin-bottom:4px'>
+                                    Sharpe {sharpe_e:.3f}
+                                </div>
+                                <div style='font-size:12px;color:#888;font-family:JetBrains Mono'>
+                                    Ret: {ret_e*100:.1f}% · Vol: {sig_e*100:.1f}%<br>
+                                    VaR diario: {var_e*100:.2f}%
+                                </div>
+                                <div style='margin-top:10px;padding-top:8px;border-top:1px solid #1c1c30'>
+                                    {''.join([f"<div style='display:flex;justify-content:space-between;font-family:JetBrains Mono;font-size:11px;margin-bottom:2px'><span style='color:#666'>{tks[j]}</span><span style='color:{color_e}'>{pesos_e[j]*100:.1f}%  ${pesos_e[j]*ps_capital:,.0f}</span></div>" for j in range(n_assets)])}
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+
+                    # Frontera eficiente simplificada
+                    st.markdown("<div class='label-tag' style='margin-top:8px'>Frontera eficiente</div>",
+                                unsafe_allow_html=True)
+                    n_pts = 40
+                    sigmas_fe = []; retornos_fe = []
+                    for target_r in np.linspace(float(mu_vec.min()), float(mu_vec.max()), n_pts):
+                        def min_var_target(w):
+                            return float(w @ cov_np @ w)
+                        cons_fe = [
+                            {"type":"eq","fun":lambda w: w.sum()-1},
+                            {"type":"eq","fun":lambda w: float(w @ mu_vec.values)-target_r},
+                        ]
+                        try:
+                            r_fe = minimize(min_var_target, w0, method="SLSQP",
+                                            bounds=bounds, constraints=cons_fe)
+                            if r_fe.success:
+                                sigmas_fe.append(float(np.sqrt(r_fe.fun))*100)
+                                retornos_fe.append(target_r*100)
+                        except: pass
+
+                    if sigmas_fe:
+                        fig_fe = go.Figure()
+                        fig_fe.add_trace(go.Scatter(
+                            x=sigmas_fe, y=retornos_fe,
+                            mode="lines", name="Frontera eficiente",
+                            line=dict(color="#00ff9d", width=2),
+                        ))
+                        # Puntos de los portafolios
+                        for nombre_e, _, sig_e, ret_e, _, color_e in estrategias:
+                            fig_fe.add_trace(go.Scatter(
+                                x=[sig_e*100], y=[ret_e*100],
+                                mode="markers+text",
+                                marker=dict(size=12, color=color_e, symbol="star"),
+                                text=[nombre_e], textposition="top center",
+                                textfont=dict(family="JetBrains Mono", size=10),
+                                name=nombre_e,
+                            ))
+                        fig_fe.update_layout(
+                            template="plotly_dark", paper_bgcolor="#0e0e1e", plot_bgcolor="#0e0e1e",
+                            font=dict(family="Syne", color="#e8e8f0"),
+                            title="Frontera eficiente — riesgo vs retorno",
+                            height=380, margin=dict(l=16,r=16,t=48,b=16),
+                            xaxis=dict(title="Volatilidad anual (%)", gridcolor="#1c1c30", color="#444466"),
+                            yaxis=dict(title="Retorno anual esperado (%)", gridcolor="#1c1c30", color="#444466"),
+                            legend=dict(bgcolor="#0a0a16", font=dict(family="JetBrains Mono", size=11)),
+                        )
+                        st.plotly_chart(fig_fe, use_container_width=True)
